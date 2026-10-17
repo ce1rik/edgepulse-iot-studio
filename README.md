@@ -23,9 +23,7 @@ Instead of relying on static hard-coded cutoffs that trigger false alarms during
 1. **Rolling Z-Score Anomaly Detection**
    Calculates the rolling mean ($\mu$) and standard deviation ($\sigma$) over the active window:
 
-   $$
-   Z_t = \frac{x_t - \mu_{\text{window}}}{\sigma_{\text{window}}}
-   $$
+   $$Z_t = \frac{x_t - \mu_{\text{window}}}{\sigma_{\text{window}}}$$
 
    Any frame where $\vert Z_t \vert \ge k$ (adjustable from $1.5\sigma$ to $3.5\sigma$, default $2.2\sigma$) flags the hardware node and logs a `WARNING` or `CRITICAL` event.
 
