@@ -1,5 +1,11 @@
 # EdgePulse — ESP32 Telemetry & Anomaly Analytics Studio
 
+[![Live Demo](https://img.shields.io/badge/Live_Demo-Vercel-000000?style=for-the-badge&logo=vercel&logoColor=white)](https://edgepulse-iot-studio.vercel.app)
+[![React](https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB)](#)
+[![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-38B2AC?style=for-the-badge&logo=tailwind-css&logoColor=white)](#)
+[![ESP32](https://img.shields.io/badge/ESP32-E7352C?style=for-the-badge&logo=espressif&logoColor=white)](#)
+[![Supabase](https://img.shields.io/badge/Supabase-181818?style=for-the-badge&logo=supabase&logoColor=3ECF8E)](#)
+
 **EdgePulse** is an IoT telemetry dashboard, virtual hardware fault emulator, and time-series anomaly detection tool. I built it to connect **ESP32 microcontroller sensor nodes** (via both **USB Web Serial** and **Wi-Fi**) with browser-based **statistical diagnostics** (rolling Z-score confidence bands and Ordinary Least Squares linear regression forecasting) backed by **Supabase PostgreSQL**.
 
 ## Features
