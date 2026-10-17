@@ -6,6 +6,7 @@ import ImportedReact, {
   useCallback as _useCallback
 } from 'react';
 
+// Use window.React if present so preview sandboxes don't hit a dual-React symbol mismatch
 const HostReact =
   typeof window !== 'undefined' && window.React ? window.React : ImportedReact;
 
@@ -20,6 +21,7 @@ if (
     ImportedReact.cloneElement = window.React.cloneElement;
     ImportedReact.Fragment = window.React.Fragment;
   } catch (_) {
+    // read-only namespace in strict ESM environments
   }
 }
 
@@ -30,6 +32,7 @@ const useRef = HostReact.useRef || _useRef;
 const useMemo = HostReact.useMemo || _useMemo;
 const useCallback = HostReact.useCallback || _useCallback;
 
+// Inline SVG helper so the dashboard runs with zero external icon dependencies
 function createIcon(paths) {
   return function IconComponent({ className = 'w-4 h-4', ...props }) {
     const React = HostReact;
@@ -218,10 +221,24 @@ const Gauge = createIcon(
     <path d="M3.34 19a10 10 0 1 1 17.32 0" />
   </>
 );
+const Usb = createIcon(
+  <>
+    <circle cx="10" cy="7" r="1" />
+    <circle cx="4" cy="20" r="1" />
+    <path d="M4.7 19.3 19 5" />
+    <path d="m21 3-3 1 2 2Z" />
+    <path d="M9.26 7.68 5 12l2 5" />
+    <path d="m10 14 5 2 3.5-3.5" />
+    <path d="m18 12 1-1 1 1-1 1Z" />
+  </>
+);
+const Send = createIcon(
+  <>
+    <line x1="22" y1="2" x2="11" y2="13" />
+    <polygon points="22 2 15 22 11 13 2 9 22 2" />
+  </>
+);
 
-// ============================================================================
-// NODE DEFINITIONS & INITIAL CONFIGURATION
-// ============================================================================
 const NODE_CONFIGS = {
   'ESP32-NODE-01': {
     id: 'ESP32-NODE-01',
@@ -235,7 +252,7 @@ const NODE_CONFIGS = {
     baseRssi: -58,
     freeHeap: 248.4,
     mac: '24:6F:28:1A:9C:01',
-    firmware: 'v2.4.1-edge'
+    firmware: 'v2.5.0-usb'
   },
   'ESP32-NODE-02': {
     id: 'ESP32-NODE-02',
@@ -249,7 +266,7 @@ const NODE_CONFIGS = {
     baseRssi: -64,
     freeHeap: 236.8,
     mac: '24:6F:28:1A:9C:02',
-    firmware: 'v2.4.1-edge'
+    firmware: 'v2.5.0-usb'
   },
   'ESP32-NODE-03': {
     id: 'ESP32-NODE-03',
@@ -263,13 +280,13 @@ const NODE_CONFIGS = {
     baseRssi: -51,
     freeHeap: 254.2,
     mac: '24:6F:28:1A:9C:03',
-    firmware: 'v2.4.1-edge'
+    firmware: 'v2.5.0-usb'
   }
 };
 
 const WINDOW_SIZE = 40;
 
-// Helper: Box-Muller Gaussian random number generator
+// Box-Muller transform for realistic sensor jitter instead of flat Math.random()
 function gaussianRandom(mean = 0, stdev = 1) {
   const u = 1 - Math.random();
   const v = Math.random();
@@ -277,7 +294,6 @@ function gaussianRandom(mean = 0, stdev = 1) {
   return z * stdev + mean;
 }
 
-// Helper: Generate initial 35 points of clean historical data per node
 function generateInitialHistory() {
   const now = Date.now();
   const historyByNode = {};
@@ -322,9 +338,6 @@ function generateInitialHistory() {
   return historyByNode;
 }
 
-// ============================================================================
-// STATISTICAL ENGINE (MEAN, STD DEV, OLS REGRESSION)
-// ============================================================================
 function computeStats(values, fallbackMean = 0, fallbackStd = 1) {
   if (!values || values.length === 0) {
     return { mean: fallbackMean, std: fallbackStd, min: fallbackMean, max: fallbackMean };
@@ -333,14 +346,13 @@ function computeStats(values, fallbackMean = 0, fallbackStd = 1) {
   const mean = values.reduce((acc, val) => acc + val, 0) / n;
   const variance =
     values.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / Math.max(1, n - 1);
+  // Clamp floor so ultra-quiet periods don't cause huge Z-scores on minor sensor noise
   const std = Math.max(Math.sqrt(variance), fallbackStd * 0.35);
   const min = Math.min(...values);
   const max = Math.max(...values);
   return { mean, std, min, max };
 }
 
-// Ordinary Least Squares (OLS) Linear Regression over array of numbers
-// Returns slope per step, intercept, R-squared, and fitted values
 function computeOLS(values, sampleRateMs = 500) {
   const n = values.length;
   if (n < 3) {
@@ -363,7 +375,6 @@ function computeOLS(values, sampleRateMs = 500) {
   const slopePerStep = denominator === 0 ? 0 : (n * sumXY - sumX * sumY) / denominator;
   const intercept = (sumY - slopePerStep * sumX) / n;
 
-  // Compute R^2
   const meanY = sumY / n;
   let ssTot = 0;
   let ssRes = 0;
@@ -378,10 +389,9 @@ function computeOLS(values, sampleRateMs = 500) {
 
   const r2 = ssTot === 0 ? 0 : Math.max(0, Math.min(1, 1 - ssRes / ssTot));
 
-  // Convert slopePerStep into rate per minute
-  // (To make demo intuitive, 1 step represents 1 telemetry interval; we scale to 60 steps/min equivalent)
+  // Scale step slope to a realistic 5-minute physical thermal projection
   const stepsPerMin = 60000 / Math.max(250, sampleRateMs);
-  const slopePerMin = slopePerStep * (stepsPerMin * 0.25); // scaled for realistic physical thermal inertia
+  const slopePerMin = slopePerStep * (stepsPerMin * 0.25);
   const currentVal = values[n - 1];
   const forecast5Min = currentVal + slopePerMin * 5;
 
@@ -395,28 +405,48 @@ function computeOLS(values, sampleRateMs = 500) {
   };
 }
 
-// ============================================================================
-// MAIN APPLICATION COMPONENT
-// ============================================================================
 export default function App() {
   const React = HostReact;
-  // Navigation & Simulation State
   const [activeTab, setActiveTab] = useState('dashboard');
   const [selectedNodeId, setSelectedNodeId] = useState('ESP32-NODE-01');
   const [isRunning, setIsRunning] = useState(true);
   const [sampleRateMs, setSampleRateMs] = useState(500);
   const [zThreshold, setZThreshold] = useState(2.2);
   const [showOlsLine, setShowOlsLine] = useState(true);
-  const [chartMetric, setChartMetric] = useState('dual'); // 'dual' | 'temp' | 'power'
+  const [chartMetric, setChartMetric] = useState('dual');
 
-  // Fault Injection State per Node
+  // Web Serial API & Serial Console state
+  const [serialConnected, setSerialConnected] = useState(false);
+  const [baudRate, setBaudRate] = useState(115200);
+  const [showSerialDrawer, setShowSerialDrawer] = useState(false);
+  const [serialError, setSerialError] = useState(null);
+  const [serialPacketCount, setSerialPacketCount] = useState(0);
+  const [customJsonPacket, setCustomJsonPacket] = useState(
+    '{"node_id":"ESP32-NODE-01","temperature_c":9.85,"voltage_v":227.4,"current_a":0.96,"power_w":218.3,"rssi_dbm":-55,"free_heap_kb":246.2}'
+  );
+  const [serialConsoleLines, setSerialConsoleLines] = useState([
+    {
+      id: 'SER-INIT-1',
+      time: new Date().toLocaleTimeString([], { hour12: false }),
+      type: 'SYS',
+      text: '[EdgePulse] Web Serial bridge initialized. Ready for USB UART @ 115200 baud or manual JSON packet injection.'
+    }
+  ]);
+
+  const serialPortRef = useRef(null);
+  const serialReaderRef = useRef(null);
+  const keepReadingRef = useRef(false);
+  const selectedNodeRef = useRef(selectedNodeId);
+  useEffect(() => {
+    selectedNodeRef.current = selectedNodeId;
+  }, [selectedNodeId]);
+
   const [nodeFaults, setNodeFaults] = useState({
     'ESP32-NODE-01': { mode: 'NOMINAL', intensity: 0 },
     'ESP32-NODE-02': { mode: 'NOMINAL', intensity: 0 },
     'ESP32-NODE-03': { mode: 'NOMINAL', intensity: 0 }
   });
 
-  // Telemetry History & Anomaly Logs
   const [telemetryByNode, setTelemetryByNode] = useState(() => generateInitialHistory());
   const [anomalyLogs, setAnomalyLogs] = useState([
     {
@@ -445,14 +475,10 @@ export default function App() {
     }
   ]);
 
-  // Interactive SVG Chart Hover State
   const [hoverIndex, setHoverIndex] = useState(null);
-
-  // Anomaly Log Filter State
   const [logNodeFilter, setLogNodeFilter] = useState('ALL');
   const [logSeverityFilter, setLogSeverityFilter] = useState('ALL');
 
-  // Firmware Generator State
   const [fwConfig, setFwConfig] = useState({
     nodeId: 'ESP32-NODE-01',
     wifiSsid: 'Engineering_Lab_IoT',
@@ -465,11 +491,10 @@ export default function App() {
     zScoreAlertLimit: 2.2
   });
 
-  // Copy / Export Feedback State
   const [copiedId, setCopiedId] = useState(null);
   const [exportToast, setExportToast] = useState(null);
 
-  // Refs for mutable simulation tracking inside setInterval
+  // Keep refs synced so the interval closure always reads current fault/threshold settings
   const faultRef = useRef(nodeFaults);
   useEffect(() => {
     faultRef.current = nodeFaults;
@@ -480,7 +505,6 @@ export default function App() {
     zThresholdRef.current = zThreshold;
   }, [zThreshold]);
 
-  // Trigger a fault mode on the currently selected node
   const triggerFault = useCallback((mode) => {
     setNodeFaults((prev) => ({
       ...prev,
@@ -491,7 +515,227 @@ export default function App() {
     }));
   }, [selectedNodeId]);
 
-  // Real-time Simulation Tick
+  const appendSerialConsole = useCallback((type, text) => {
+    const time = new Date().toLocaleTimeString([], {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+    setSerialConsoleLines((prev) => [
+      ...prev.slice(-79),
+      { id: `SER-${Date.now()}-${Math.random()}`, time, type, text }
+    ]);
+  }, []);
+
+  // Parse incoming serial line (from physical USB ESP32 or packet tester) and inject into node telemetry
+  const ingestSerialLine = useCallback(
+    (rawLine) => {
+      const trimmed = (rawLine || '').trim();
+      if (!trimmed) return;
+
+      appendSerialConsole('RX', trimmed);
+
+      if (!trimmed.startsWith('{')) return;
+
+      try {
+        const parsed = JSON.parse(trimmed);
+        const targetNodeId =
+          parsed.node_id && NODE_CONFIGS[parsed.node_id]
+            ? parsed.node_id
+            : selectedNodeRef.current;
+
+        const cfg = NODE_CONFIGS[targetNodeId];
+        const now = new Date();
+        const timeLabel = now.toLocaleTimeString([], {
+          hour12: false,
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        });
+        const isoTime = now.toISOString();
+
+        let detectedAnomaly = null;
+
+        setTelemetryByNode((prevHistory) => {
+          const nodeHistory = prevHistory[targetNodeId] || [];
+          const lastPoint = nodeHistory[nodeHistory.length - 1];
+
+          const recentTemps = nodeHistory.slice(-25).map((p) => p.temp);
+          const recentPowers = nodeHistory.slice(-25).map((p) => p.power);
+
+          const rawTempStats = computeStats(recentTemps, cfg.nominalTemp, cfg.tempStdBase);
+          const rawPowerStats = computeStats(recentPowers, cfg.nominalPower, cfg.powerStdBase);
+
+          const effectiveTempMean = cfg.nominalTemp * 0.65 + rawTempStats.mean * 0.35;
+          const effectiveTempStd = Math.max(cfg.tempStdBase, rawTempStats.std * 0.55);
+
+          const effectivePowerMean = cfg.nominalPower * 0.65 + rawPowerStats.mean * 0.35;
+          const effectivePowerStd = Math.max(cfg.powerStdBase, rawPowerStats.std * 0.55);
+
+          const nextTemp = Number(
+            (parsed.temperature_c ?? parsed.temp ?? cfg.nominalTemp).toFixed(2)
+          );
+          const nextVoltage = Number(
+            (parsed.voltage_v ?? parsed.voltage ?? cfg.nominalVoltage).toFixed(1)
+          );
+          const nextPower = Number(
+            (
+              parsed.power_w ??
+              parsed.power ??
+              (parsed.current_a ? nextVoltage * parsed.current_a : cfg.nominalPower)
+            ).toFixed(1)
+          );
+          const nextCurrent = Number(
+            (parsed.current_a ?? nextPower / Math.max(100, nextVoltage)).toFixed(2)
+          );
+
+          const tempZ = Number(((nextTemp - effectiveTempMean) / effectiveTempStd).toFixed(2));
+          const powerZ = Number(((nextPower - effectivePowerMean) / effectivePowerStd).toFixed(2));
+          const maxAbsZ = Number(Math.max(Math.abs(tempZ), Math.abs(powerZ)).toFixed(2));
+
+          const threshold = zThresholdRef.current;
+          const isAnomaly = maxAbsZ >= threshold;
+
+          const newPoint = {
+            seq: parsed.seq || (lastPoint?.seq || 0) + 1,
+            timestamp: isoTime,
+            timeLabel,
+            nodeId: targetNodeId,
+            temp: nextTemp,
+            power: nextPower,
+            voltage: nextVoltage,
+            current: nextCurrent,
+            tempMean: Number(effectiveTempMean.toFixed(2)),
+            tempStd: Number(effectiveTempStd.toFixed(2)),
+            powerMean: Number(effectivePowerMean.toFixed(1)),
+            powerStd: Number(effectivePowerStd.toFixed(1)),
+            tempZ,
+            powerZ,
+            maxAbsZ,
+            isAnomaly,
+            faultMode: 'USB_SERIAL',
+            rssi: parsed.rssi_dbm ?? cfg.baseRssi,
+            heapKB: Number((parsed.free_heap_kb ?? cfg.freeHeap).toFixed(1))
+          };
+
+          if (isAnomaly) {
+            const isTempPrimary = Math.abs(tempZ) >= Math.abs(powerZ);
+            const primaryZ = isTempPrimary ? tempZ : powerZ;
+            const severity = Math.abs(primaryZ) >= threshold + 0.8 ? 'CRITICAL' : 'WARNING';
+
+            detectedAnomaly = {
+              id: `ANOM-USB-${now.getTime()}-${targetNodeId}`,
+              timestamp: timeLabel,
+              isoTime,
+              nodeId: targetNodeId,
+              metric: isTempPrimary ? 'Temperature (°C)' : 'Power Draw (W)',
+              observed: isTempPrimary ? `${nextTemp.toFixed(2)} °C` : `${nextPower.toFixed(1)} W`,
+              mean: isTempPrimary
+                ? `${effectiveTempMean.toFixed(2)} °C`
+                : `${effectivePowerMean.toFixed(1)} W`,
+              zScore: primaryZ,
+              faultMode: 'USB_SERIAL',
+              severity
+            };
+          }
+
+          return {
+            ...prevHistory,
+            [targetNodeId]: [...nodeHistory.slice(-(WINDOW_SIZE - 1)), newPoint]
+          };
+        });
+
+        setSerialPacketCount((c) => c + 1);
+        if (detectedAnomaly) {
+          setAnomalyLogs((prev) => [detectedAnomaly, ...prev].slice(0, 120));
+        }
+      } catch (err) {
+        appendSerialConsole('ERR', `Malformed JSON frame: ${err.message}`);
+      }
+    },
+    [appendSerialConsole]
+  );
+
+  const disconnectUsbSerial = useCallback(async () => {
+    keepReadingRef.current = false;
+    try {
+      if (serialReaderRef.current) {
+        await serialReaderRef.current.cancel();
+        serialReaderRef.current.releaseLock();
+        serialReaderRef.current = null;
+      }
+      if (serialPortRef.current) {
+        await serialPortRef.current.close();
+        serialPortRef.current = null;
+      }
+    } catch (err) {
+      appendSerialConsole('ERR', `Port close warning: ${err.message}`);
+    } finally {
+      setSerialConnected(false);
+      appendSerialConsole('SYS', 'Disconnected from USB Serial port. Reverted to Virtual Emulator.');
+    }
+  }, [appendSerialConsole]);
+
+  const connectUsbSerial = useCallback(async () => {
+    setSerialError(null);
+    setShowSerialDrawer(true);
+
+    if (typeof navigator === 'undefined' || !('serial' in navigator)) {
+      const msg =
+        'Web Serial API is not available in this browser context. Use Chrome or Edge on desktop (HTTPS or localhost), or test below with the Manual JSON Packet Injector.';
+      setSerialError(msg);
+      appendSerialConsole('ERR', msg);
+      return;
+    }
+
+    try {
+      const port = await navigator.serial.requestPort();
+      await port.open({ baudRate: Number(baudRate) || 115200 });
+
+      serialPortRef.current = port;
+      keepReadingRef.current = true;
+      setSerialConnected(true);
+      appendSerialConsole(
+        'SYS',
+        `Connected to physical ESP32 over USB Serial (${baudRate} baud). Virtual emulator paused for ${selectedNodeRef.current}.`
+      );
+
+      const decoder = new TextDecoder();
+      let lineBuffer = '';
+
+      while (port.readable && keepReadingRef.current) {
+        const reader = port.readable.getReader();
+        serialReaderRef.current = reader;
+        try {
+          while (keepReadingRef.current) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value) {
+              lineBuffer += decoder.decode(value, { stream: true });
+              const lines = lineBuffer.split(/\r?\n/);
+              lineBuffer = lines.pop() || '';
+              for (const line of lines) {
+                ingestSerialLine(line);
+              }
+            }
+          }
+        } catch (readErr) {
+          if (keepReadingRef.current) {
+            appendSerialConsole('ERR', `Serial read interrupted: ${readErr.message}`);
+          }
+        } finally {
+          reader.releaseLock();
+          serialReaderRef.current = null;
+        }
+      }
+    } catch (err) {
+      setSerialError(err.message || 'Serial connection cancelled or failed.');
+      appendSerialConsole('ERR', `USB connection failed: ${err.message}`);
+      setSerialConnected(false);
+    }
+  }, [baudRate, appendSerialConsole, ingestSerialLine]);
+
   useEffect(() => {
     if (!isRunning) return;
 
@@ -511,19 +755,23 @@ export default function App() {
         const updatedHistory = { ...prevHistory };
 
         Object.keys(NODE_CONFIGS).forEach((nodeId) => {
+          // If physical USB Serial is active, let the USB stream drive the selected node
+          if (serialConnected && nodeId === selectedNodeRef.current) {
+            return;
+          }
+
           const cfg = NODE_CONFIGS[nodeId];
           const nodeHistory = prevHistory[nodeId] || [];
           const lastPoint = nodeHistory[nodeHistory.length - 1];
           const currentFault = faultRef.current[nodeId] || { mode: 'NOMINAL', intensity: 0 };
 
-          // Calculate baseline stats from nominal/clean window so ongoing faults don't immediately mask themselves
           const recentTemps = nodeHistory.slice(-25).map((p) => p.temp);
           const recentPowers = nodeHistory.slice(-25).map((p) => p.power);
 
           const rawTempStats = computeStats(recentTemps, cfg.nominalTemp, cfg.tempStdBase);
           const rawPowerStats = computeStats(recentPowers, cfg.nominalPower, cfg.powerStdBase);
 
-          // Blend with physical baseline calibration to prevent variance inflation during sustained faults
+          // Weight rolling stats with nominal calibration so prolonged faults don't normalize themselves
           const effectiveTempMean = cfg.nominalTemp * 0.65 + rawTempStats.mean * 0.35;
           const effectiveTempStd = Math.max(cfg.tempStdBase, rawTempStats.std * 0.55);
 
@@ -534,7 +782,6 @@ export default function App() {
           let nextVoltage = gaussianRandom(cfg.nominalVoltage, 0.7);
           let nextPower = gaussianRandom(cfg.nominalPower, cfg.powerStdBase);
 
-          // Apply active hardware fault injection
           if (currentFault.mode === 'THERMAL_SPIKE') {
             const prevTempOffset = Math.max(0, (lastPoint?.temp || cfg.nominalTemp) - cfg.nominalTemp);
             const rampedOffset = Math.min(cfg.tempStdBase * 6.5, prevTempOffset + cfg.tempStdBase * 0.85);
@@ -548,11 +795,9 @@ export default function App() {
             nextTemp = gaussianRandom(cfg.nominalTemp, cfg.tempStdBase * 3.8);
             nextPower = gaussianRandom(cfg.nominalPower, cfg.powerStdBase * 3.6);
             nextVoltage = gaussianRandom(cfg.nominalVoltage, 4.5);
-          } else {
-            // Smooth recovery toward nominal if recovering from a spike
-            if (lastPoint && Math.abs(lastPoint.temp - cfg.nominalTemp) > cfg.tempStdBase * 2) {
-              nextTemp = lastPoint.temp * 0.55 + cfg.nominalTemp * 0.45 + gaussianRandom(0, cfg.tempStdBase * 0.3);
-            }
+          } else if (lastPoint && Math.abs(lastPoint.temp - cfg.nominalTemp) > cfg.tempStdBase * 2) {
+            // Cool down gradually after clearing a thermal fault
+            nextTemp = lastPoint.temp * 0.55 + cfg.nominalTemp * 0.45 + gaussianRandom(0, cfg.tempStdBase * 0.3);
           }
 
           nextTemp = Number(nextTemp.toFixed(2));
@@ -620,9 +865,8 @@ export default function App() {
     }, sampleRateMs);
 
     return () => clearInterval(timer);
-  }, [isRunning, sampleRateMs]);
+  }, [isRunning, sampleRateMs, serialConnected]);
 
-  // Active Node Data & Derived Statistics
   const activeNodeCfg = NODE_CONFIGS[selectedNodeId];
   const activeSeries = telemetryByNode[selectedNodeId] || [];
   const latestPoint = activeSeries[activeSeries.length - 1] || {};
@@ -644,12 +888,7 @@ export default function App() {
     () => computeOLS(tempValues, sampleRateMs),
     [tempValues, sampleRateMs]
   );
-  const powerOls = useMemo(
-    () => computeOLS(powerValues, sampleRateMs),
-    [powerValues, sampleRateMs]
-  );
 
-  // Filtered Anomaly Logs
   const filteredAnomalies = useMemo(() => {
     return anomalyLogs.filter((item) => {
       const matchNode = logNodeFilter === 'ALL' || item.nodeId === logNodeFilter;
@@ -658,14 +897,12 @@ export default function App() {
     });
   }, [anomalyLogs, logNodeFilter, logSeverityFilter]);
 
-  // Copy to Clipboard Utility
   const handleCopyText = (text, id) => {
     navigator.clipboard.writeText(text);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2200);
   };
 
-  // File Download Utility (CSV / JSON / INO / SQL)
   const triggerFileDownload = (content, filename, mimeType) => {
     const blob = new Blob([content], { type: mimeType });
     const url = URL.createObjectURL(blob);
@@ -681,7 +918,6 @@ export default function App() {
     setTimeout(() => setExportToast(null), 3000);
   };
 
-  // Export Telemetry CSV
   const handleExportTelemetryCSV = () => {
     const allRows = Object.values(telemetryByNode).flat();
     const headers = [
@@ -726,7 +962,6 @@ export default function App() {
     triggerFileDownload(csvLines.join('\n'), `edgepulse_telemetry_${Date.now()}.csv`, 'text/csv;charset=utf-8;');
   };
 
-  // Export Telemetry & Anomalies JSON
   const handleExportDatasetJSON = () => {
     const payload = {
       exportedAt: new Date().toISOString(),
@@ -743,16 +978,12 @@ export default function App() {
     );
   };
 
-  // Dynamic C++ Firmware Code Generator
   const generatedFirmwareCode = useMemo(() => {
-    return `/**
- * ============================================================================
- * EdgePulse — ESP32 Edge Telemetry & Statistical Anomaly Node Firmware
- * Target Node : ${fwConfig.nodeId}
- * Framework   : Arduino / ESP-IDF (ESP32-WROOM-32D)
- * Features    : Edge Rolling Z-Score Calculation, Hardware ADC Oversampling,
- *               Supabase PostgreSQL REST Ingestion & Status Watchdog
- * ============================================================================
+    return `/*
+ * EdgePulse Node Firmware (${fwConfig.nodeId})
+ * Target: ESP32-WROOM-32D (Arduino / ESP-IDF)
+ * Dual Transport: Streams newline-delimited JSON over USB Serial (115200 baud)
+ * for direct Web Serial API ingestion AND posts to Supabase PostgREST over Wi-Fi.
  */
 
 #include <WiFi.h>
@@ -761,18 +992,16 @@ export default function App() {
 #include <DHT.h>
 #include <math.h>
 
-// --- Network & Cloud Credentials ---
 const char* WIFI_SSID     = "${fwConfig.wifiSsid}";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 const char* SUPABASE_URL  = "${fwConfig.supabaseUrl}/rest/v1/telemetry_logs";
 const char* SUPABASE_KEY  = "YOUR_SUPABASE_SERVICE_ROLE_OR_ANON_KEY";
 const char* NODE_ID       = "${fwConfig.nodeId}";
 
-// --- Hardware Pin Assignments ---
-#define PIN_DHT_SENSOR    ${fwConfig.tempPin}     // Digital Temperature Sensor (DHT22)
-#define PIN_ACS712_ADC    ${fwConfig.currentPin}    // Analog Current Sensor (ADC1)
-#define PIN_ZMPT101B_ADC  ${fwConfig.voltagePin}    // Analog AC Voltage Sensor (ADC1)
-#define PIN_STATUS_LED    ${fwConfig.statusLedPin}     // On-board Anomaly Alert LED
+#define PIN_DHT_SENSOR    ${fwConfig.tempPin}
+#define PIN_ACS712_ADC    ${fwConfig.currentPin}
+#define PIN_ZMPT101B_ADC  ${fwConfig.voltagePin}
+#define PIN_STATUS_LED    ${fwConfig.statusLedPin}
 
 #define DHTTYPE           DHT22
 #define SAMPLE_INTERVAL   ${fwConfig.intervalMs}UL
@@ -781,7 +1010,6 @@ const char* NODE_ID       = "${fwConfig.nodeId}";
 
 DHT dht(PIN_DHT_SENSOR, DHTTYPE);
 
-// --- Rolling Window Buffer for Edge Statistical Analysis ---
 float tempBuffer[WINDOW_SIZE];
 int bufferIndex = 0;
 int sampleCount = 0;
@@ -799,9 +1027,10 @@ void computeRollingStats(float* buf, int count, float &mean, float &stdDev) {
     varianceSum += pow(buf[i] - mean, 2);
   }
   stdDev = sqrt(varianceSum / max(1, count - 1));
-  if (stdDev < 0.15f) stdDev = 0.15f; // Noise floor clamp
+  if (stdDev < 0.15f) stdDev = 0.15f; // clamp noise floor
 }
 
+// 64-sample oversampling to smooth out ESP32 ADC non-linearity
 float readRmsVoltage() {
   long adcSum = 0;
   for (int i = 0; i < 64; i++) {
@@ -828,16 +1057,15 @@ void setup() {
   analogReadResolution(12);
   dht.begin();
 
-  Serial.printf("[EdgePulse] Booting Node %s...\\n", NODE_ID);
+  Serial.printf("[EdgePulse] Booting %s (Web Serial + Wi-Fi)...\\n", NODE_ID);
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(400);
-    Serial.print(".");
+  // Non-blocking 4-second Wi-Fi attempt so USB Serial works even offline
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 4000) {
+    delay(250);
   }
-  Serial.printf("\\n[EdgePulse] Wi-Fi Connected! IP: %s | RSSI: %d dBm\\n",
-                WiFi.localIP().toString().c_str(), WiFi.RSSI());
 }
 
 void loop() {
@@ -845,29 +1073,24 @@ void loop() {
   if (now - lastTelemetryTick < SAMPLE_INTERVAL) return;
   lastTelemetryTick = now;
 
-  // 1. Acquire Sensor Readings
   float temperature = dht.readTemperature();
   if (isnan(temperature)) temperature = 25.0f;
   float voltage = readRmsVoltage();
   float current = readRmsCurrent();
   float powerWatts = voltage * current;
 
-  // 2. Compute Rolling Mean & Z-Score on the Edge
   float rollingMean = 0.0f, rollingStd = 1.0f;
   computeRollingStats(tempBuffer, sampleCount, rollingMean, rollingStd);
   float tempZScore = (temperature - rollingMean) / rollingStd;
   bool isAnomaly = fabs(tempZScore) >= Z_SCORE_THRESHOLD;
 
-  // Update Circular Buffer
   tempBuffer[bufferIndex] = temperature;
   bufferIndex = (bufferIndex + 1) % WINDOW_SIZE;
   if (sampleCount < WINDOW_SIZE) sampleCount++;
 
-  // Drive Hardware Anomaly Status LED
   digitalWrite(PIN_STATUS_LED, isAnomaly ? HIGH : LOW);
   packetSequence++;
 
-  // 3. Serialize Telemetry JSON Payload
   StaticJsonDocument<384> doc;
   doc["node_id"]       = NODE_ID;
   doc["seq"]           = packetSequence;
@@ -878,14 +1101,14 @@ void loop() {
   doc["rolling_mean"]  = serialized(String(rollingMean, 2));
   doc["z_score"]       = serialized(String(tempZScore, 2));
   doc["is_anomaly"]    = isAnomaly;
-  doc["rssi_dbm"]      = WiFi.RSSI();
+  doc["rssi_dbm"]      = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : -50;
   doc["free_heap_kb"]  = ESP.getFreeHeap() / 1024.0f;
 
   String jsonPayload;
   serializeJson(doc, jsonPayload);
+  // Newline-delimited JSON frame read directly by EdgePulse Web Serial API
   Serial.println(jsonPayload);
 
-  // 4. Dispatch to Supabase PostgreSQL via REST
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
     http.begin(SUPABASE_URL);
@@ -894,24 +1117,20 @@ void loop() {
     http.addHeader("Authorization", String("Bearer ") + SUPABASE_KEY);
     http.addHeader("Prefer", "return=minimal");
 
-    int httpResponseCode = http.POST(jsonPayload);
-    if (httpResponseCode >= 400) {
-      Serial.printf("[EdgePulse] Supabase POST Error: HTTP %d\\n", httpResponseCode);
+    int status = http.POST(jsonPayload);
+    if (status >= 400) {
+      Serial.printf("[EdgePulse] POST failed (HTTP %d)\\n", status);
     }
     http.end();
   }
 }`;
   }, [fwConfig]);
 
-  // Supabase SQL Schema
-  const supabaseSchemaCode = `-- ============================================================================
--- EdgePulse — Supabase PostgreSQL Telemetry & Anomaly Analytics Schema
--- Includes: Time-Series Tables, BRIN/B-Tree Indexes, RLS Policies & PL/pgSQL Trigger
--- ============================================================================
+  const supabaseSchemaCode = `-- EdgePulse PostgreSQL schema for Supabase
+-- Sets up telemetry_logs, anomaly_events, indexes, RLS, and an insert trigger
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
--- 1. Primary ESP32 High-Frequency Telemetry Table
 CREATE TABLE IF NOT EXISTS public.telemetry_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -928,7 +1147,6 @@ CREATE TABLE IF NOT EXISTS public.telemetry_logs (
     free_heap_kb NUMERIC(6, 1)
 );
 
--- 2. Dedicated Statistical Anomaly Events Audit Table
 CREATE TABLE IF NOT EXISTS public.anomaly_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -942,7 +1160,7 @@ CREATE TABLE IF NOT EXISTS public.anomaly_events (
     resolved BOOLEAN NOT NULL DEFAULT FALSE
 );
 
--- 3. High-Performance Time-Series Indexes
+-- BRIN index keeps time-range scans fast as telemetry_logs grows
 CREATE INDEX IF NOT EXISTS idx_telemetry_node_created
     ON public.telemetry_logs (node_id, created_at DESC);
 
@@ -952,7 +1170,7 @@ CREATE INDEX IF NOT EXISTS idx_telemetry_brin_created
 CREATE INDEX IF NOT EXISTS idx_anomaly_events_severity
     ON public.anomaly_events (node_id, severity, detected_at DESC);
 
--- 4. PL/pgSQL Trigger Function for Automated Server-Side Anomaly Auditing
+-- Automatically log an anomaly event whenever |z_score| crosses the threshold
 CREATE OR REPLACE FUNCTION public.fn_audit_telemetry_anomaly()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -987,16 +1205,13 @@ CREATE TRIGGER trg_telemetry_anomaly_check
     FOR EACH ROW
     EXECUTE FUNCTION public.fn_audit_telemetry_anomaly();
 
--- 5. Row-Level Security (RLS) Policies
 ALTER TABLE public.telemetry_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.anomaly_events ENABLE ROW LEVEL SECURITY;
 
--- Allow authenticated dashboard users to read live telemetry
 CREATE POLICY "Allow public read access to telemetry_logs"
     ON public.telemetry_logs FOR SELECT
     USING (true);
 
--- Allow ESP32 Edge Nodes (via service_role or IoT API key) to insert logs
 CREATE POLICY "Allow edge device telemetry ingestion"
     ON public.telemetry_logs FOR INSERT
     WITH CHECK (node_id LIKE 'ESP32-NODE-%');
@@ -1005,13 +1220,9 @@ CREATE POLICY "Allow public read access to anomaly_events"
     ON public.anomaly_events FOR SELECT
     USING (true);
 
--- 6. Enable Supabase Realtime Broadcast
 ALTER PUBLICATION supabase_realtime ADD TABLE public.telemetry_logs;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.anomaly_events;`;
 
-  // ============================================================================
-  // SVG DUAL TIME-SERIES CHART GEOMETRY CALCULATIONS
-  // ============================================================================
   const svgWidth = 860;
   const svgHeight = 300;
   const padLeft = 52;
@@ -1021,13 +1232,11 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.anomaly_events;`;
   const plotW = svgWidth - padLeft - padRight;
   const plotH = svgHeight - padTop - padBottom;
 
-  // Temperature Y-Domain
   const tempBandLow = tempStats.mean - zThreshold * tempStats.std;
   const tempBandHigh = tempStats.mean + zThreshold * tempStats.std;
   const minTempY = Math.min(tempStats.min, tempBandLow, activeNodeCfg.nominalTemp - activeNodeCfg.tempStdBase * 4) - 0.6;
   const maxTempY = Math.max(tempStats.max, tempBandHigh, activeNodeCfg.nominalTemp + activeNodeCfg.tempStdBase * 4) + 0.6;
 
-  // Power Y-Domain
   const minPowerY = Math.min(powerStats.min, activeNodeCfg.nominalPower - activeNodeCfg.powerStdBase * 4) - 15;
   const maxPowerY = Math.max(powerStats.max, activeNodeCfg.nominalPower + activeNodeCfg.powerStdBase * 4) + 15;
 
@@ -1072,7 +1281,6 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.anomaly_events;`;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-emerald-500/30 selection:text-emerald-200">
-      {/* Export Toast Notification */}
       {exportToast && (
         <div className="fixed bottom-5 right-5 z-50 flex items-center gap-2.5 bg-emerald-500 text-slate-950 px-4 py-2.5 rounded-lg shadow-xl font-medium text-sm animate-bounce">
           <CheckCircle2 className="w-4 h-4 shrink-0" />
@@ -1080,12 +1288,8 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.anomaly_events;`;
         </div>
       )}
 
-      {/* ====================================================================
-          1. TOP NAVIGATION & TELEMETRY STATUS BAR
-         ==================================================================== */}
       <header className="sticky top-0 z-30 bg-slate-950/90 backdrop-blur-md border-b border-slate-800">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-          {/* Brand Title & Status */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shadow-inner">
@@ -1098,16 +1302,15 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.anomaly_events;`;
                     <span className="text-emerald-400">IoT Telemetry & Anomaly Studio</span>
                   </h1>
                   <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono bg-slate-900 text-slate-400 border border-slate-800">
-                    v2.4-Portfolio
+                    v2.5-USB
                   </span>
                 </div>
                 <p className="text-xs text-slate-400">
-                  Virtual ESP32 Cluster Emulator • Rolling Z-Score & OLS Forecasting • Supabase Integration
+                  ESP32 Cluster Emulator • Web Serial USB Bridge • Rolling Z-Score & OLS Forecasting
                 </p>
               </div>
             </div>
 
-            {/* Mobile Play/Pause Toggle */}
             <button
               onClick={() => setIsRunning((r) => !r)}
               className={`lg:hidden flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-semibold border transition-all ${
@@ -1121,9 +1324,44 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.anomaly_events;`;
             </button>
           </div>
 
-          {/* Right Controls: Simulation Status, Sampling Frequency & Navigation Tabs */}
           <div className="flex flex-wrap items-center justify-between lg:justify-end gap-2.5">
-            {/* Stream Status & Sampling Selector */}
+            {/* Web Serial USB Hardware Bridge Controls */}
+            <div className="flex items-center gap-1.5 bg-slate-900/90 border border-slate-800 rounded-lg p-1">
+              {serialConnected ? (
+                <button
+                  onClick={disconnectUsbSerial}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hover:bg-rose-500/20 hover:text-rose-300 hover:border-rose-500/40 transition-all"
+                  title="Disconnect physical ESP32 USB Serial port"
+                >
+                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+                  <Usb className="w-3.5 h-3.5" />
+                  <span>USB LIVE ({serialPacketCount} pkts)</span>
+                </button>
+              ) : (
+                <button
+                  onClick={connectUsbSerial}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-mono font-medium bg-slate-950 text-cyan-400 hover:bg-cyan-950/50 border border-cyan-500/30 transition-all"
+                  title="Connect physical ESP32 via Chrome/Edge Web Serial API (115200 baud)"
+                >
+                  <Usb className="w-3.5 h-3.5" />
+                  <span>Connect USB Serial</span>
+                </button>
+              )}
+
+              <button
+                onClick={() => setShowSerialDrawer((s) => !s)}
+                className={`flex items-center gap-1 px-2 py-1 rounded-md text-xs font-mono transition-colors ${
+                  showSerialDrawer
+                    ? 'bg-slate-800 text-cyan-300 border border-slate-700'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+                title="Toggle Serial Monitor & JSON Packet Injector"
+              >
+                <Terminal className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Monitor</span>
+              </button>
+            </div>
+
             <div className="flex items-center gap-2 bg-slate-900/90 border border-slate-800 rounded-lg p-1">
               <button
                 onClick={() => setIsRunning((r) => !r)}
@@ -1132,7 +1370,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.anomaly_events;`;
                     ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
                     : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                 }`}
-                title="Toggle Virtual ESP32 Telemetry Stream"
+                title="Toggle telemetry stream"
               >
                 <span
                   className={`w-2 h-2 rounded-full ${
@@ -1160,7 +1398,6 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.anomaly_events;`;
               </div>
             </div>
 
-            {/* Navigation Tabs */}
             <nav className="flex flex-wrap items-center gap-1 bg-slate-900/90 border border-slate-800 rounded-lg p-1">
               <button
                 onClick={() => setActiveTab('dashboard')}
@@ -1223,12 +1460,171 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.anomaly_events;`;
         </div>
       </header>
 
-      {/* ====================================================================
-          2. NODE SELECTOR & HARDWARE FAULT INJECTION BAR
-         ==================================================================== */}
+      {/* Collapsible Web Serial Monitor & Manual JSON Frame Injector */}
+      {showSerialDrawer && (
+        <section className="bg-slate-950 border-b border-cyan-500/30 shadow-inner">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 space-y-3">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <span className="p-1.5 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-400">
+                  <Usb className="w-4 h-4" />
+                </span>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-xs font-mono uppercase tracking-wider font-bold text-white">
+                      Web Serial Hardware Bridge (UART / USB-CDC)
+                    </h2>
+                    <span
+                      className={`px-2 py-0.5 rounded text-[10px] font-mono font-semibold ${
+                        serialConnected
+                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                          : 'bg-slate-900 text-slate-400 border border-slate-800'
+                      }`}
+                    >
+                      {serialConnected ? 'CONNECTED TO COM PORT' : 'VIRTUAL EMULATOR FALLBACK'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Streams newline-delimited JSON packets from a physical ESP32 via Chrome/Edge{' '}
+                    <code className="text-cyan-300 font-mono">navigator.serial</code> or tests the parser with manual JSON frames below.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="text-xs font-mono text-slate-400 flex items-center gap-1.5">
+                  <span>Baud:</span>
+                  <select
+                    value={baudRate}
+                    onChange={(e) => setBaudRate(Number(e.target.value))}
+                    disabled={serialConnected}
+                    className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-200"
+                  >
+                    <option value={9600}>9600</option>
+                    <option value={57600}>57600</option>
+                    <option value={115200}>115200</option>
+                    <option value={230400}>230400</option>
+                  </select>
+                </label>
+
+                {!serialConnected ? (
+                  <button
+                    onClick={connectUsbSerial}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-semibold bg-cyan-500 text-slate-950 hover:bg-cyan-400 transition-colors"
+                  >
+                    <Usb className="w-3.5 h-3.5" />
+                    <span>Select Serial Port</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={disconnectUsbSerial}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-semibold bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-rose-500/30 transition-colors"
+                  >
+                    <span>Close Port</span>
+                  </button>
+                )}
+
+                <button
+                  onClick={() => setSerialConsoleLines([])}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-mono text-slate-400 hover:text-slate-200 bg-slate-900 border border-slate-800"
+                >
+                  Clear Log
+                </button>
+              </div>
+            </div>
+
+            {serialError && (
+              <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-center justify-between gap-2">
+                <span>{serialError}</span>
+                <button
+                  onClick={() => setSerialError(null)}
+                  className="text-[11px] font-mono underline shrink-0"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-3">
+              {/* Live Serial RX Stream */}
+              <div className="lg:col-span-7 bg-slate-900/90 border border-slate-800 rounded-lg p-3 font-mono text-xs h-36 overflow-y-auto space-y-1">
+                {serialConsoleLines.length === 0 ? (
+                  <div className="text-slate-500 text-center py-10">
+                    Waiting for incoming serial frames...
+                  </div>
+                ) : (
+                  serialConsoleLines.map((line) => (
+                    <div key={line.id} className="flex items-start gap-2 leading-relaxed">
+                      <span className="text-slate-500 shrink-0">{line.time}</span>
+                      <span
+                        className={`px-1.5 rounded text-[10px] font-bold shrink-0 ${
+                          line.type === 'RX'
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : line.type === 'ERR'
+                            ? 'bg-rose-500/20 text-rose-300'
+                            : 'bg-cyan-500/20 text-cyan-300'
+                        }`}
+                      >
+                        {line.type}
+                      </span>
+                      <span className="text-slate-200 break-all">{line.text}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {/* Manual Serial JSON Packet Tester (works without hardware connected) */}
+              <div className="lg:col-span-5 bg-slate-900/90 border border-slate-800 rounded-lg p-3 flex flex-col justify-between gap-2">
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] font-mono uppercase tracking-wider text-cyan-400 font-semibold">
+                      Test Serial JSON Frame Injector
+                    </span>
+                    <button
+                      onClick={() =>
+                        setCustomJsonPacket(
+                          JSON.stringify({
+                            node_id: selectedNodeId,
+                            temperature_c: Number(
+                              (activeNodeCfg.nominalTemp + activeNodeCfg.tempStdBase * 4.2).toFixed(2)
+                            ),
+                            voltage_v: 226.8,
+                            current_a: 1.15,
+                            power_w: Number(
+                              (activeNodeCfg.nominalPower + activeNodeCfg.powerStdBase * 3.8).toFixed(1)
+                            ),
+                            rssi_dbm: -53,
+                            free_heap_kb: 245.6
+                          })
+                        )
+                      }
+                      className="text-[11px] font-mono text-slate-400 hover:text-emerald-400 underline"
+                    >
+                      Load Spike Preset
+                    </button>
+                  </div>
+                  <textarea
+                    rows={3}
+                    value={customJsonPacket}
+                    onChange={(e) => setCustomJsonPacket(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs font-mono text-emerald-300 focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+                <button
+                  onClick={() => ingestSerialLine(customJsonPacket)}
+                  className="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 rounded bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 text-xs font-mono font-semibold transition-colors"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>Inject JSON Frame into {selectedNodeId}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
       <section className="bg-slate-900/40 border-b border-slate-800/80">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3.5 flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
-          {/* Edge Node Selector Pills */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-2">
             <span className="text-xs font-mono uppercase tracking-wider text-slate-400 flex items-center gap-1.5 mr-1">
               <Server className="w-3.5 h-3.5 text-emerald-400" />
@@ -1275,14 +1671,14 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.anomaly_events;`;
 
                     <div className="text-right font-mono shrink-0">
                       <div
-                        className={`text-xs font-semibold ${
+                        className={`text-xs font-bold ${
                           hasAlert ? 'text-rose-400' : 'text-emerald-400'
                         }`}
                       >
-                        {lastPt ? `${lastPt.temp.toFixed(1)}°C` : `${node.nominalTemp}°C`}
+                        {lastPt ? `${lastPt.temp.toFixed(1)}°C` : '--'}
                       </div>
-                      <div className="text-[10px] text-slate-500">
-                        {lastPt ? `${lastPt.power.toFixed(0)}W` : `${node.nominalPower}W`}
+                      <div className="text-[10px] text-slate-400">
+                        {lastPt ? `${lastPt.power.toFixed(0)}W` : '--'}
                       </div>
                     </div>
                   </button>
@@ -1291,720 +1687,659 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.anomaly_events;`;
             </div>
           </div>
 
-          {/* Hardware Fault Injection Bar */}
           <div className="flex flex-wrap items-center gap-2 pt-2 xl:pt-0 border-t xl:border-t-0 border-slate-800/80">
             <span className="text-xs font-mono uppercase tracking-wider text-slate-400 flex items-center gap-1.5 mr-1">
               <Sliders className="w-3.5 h-3.5 text-amber-400" />
-              Fault Simulator ({selectedNodeId}):
+              Fault Injection ({selectedNodeId}):
             </span>
 
             <button
               onClick={() => triggerFault('THERMAL_SPIKE')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-medium border transition-all ${
                 activeFault === 'THERMAL_SPIKE'
-                  ? 'bg-rose-500/20 text-rose-300 border-rose-500/60 shadow-sm shadow-rose-500/20'
-                  : 'bg-slate-900 hover:bg-rose-500/10 text-slate-300 hover:text-rose-300 border-slate-800'
+                  ? 'bg-rose-500/20 text-rose-300 border-rose-500/50 shadow-sm'
+                  : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-rose-500/40 hover:text-rose-300'
               }`}
             >
               <Flame className="w-3.5 h-3.5 text-rose-400" />
-              <span>Inject Thermal Spike</span>
+              <span>Thermal Spike</span>
             </button>
 
             <button
               onClick={() => triggerFault('VOLTAGE_SAG')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-medium border transition-all ${
                 activeFault === 'VOLTAGE_SAG'
-                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/60 shadow-sm shadow-amber-500/20'
-                  : 'bg-slate-900 hover:bg-amber-500/10 text-slate-300 hover:text-amber-300 border-slate-800'
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-sm'
+                  : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-amber-500/40 hover:text-amber-300'
               }`}
             >
               <Zap className="w-3.5 h-3.5 text-amber-400" />
-              <span>Simulate Voltage Sag</span>
+              <span>AC Voltage Sag</span>
             </button>
 
             <button
               onClick={() => triggerFault('SENSOR_NOISE')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-medium border transition-all ${
                 activeFault === 'SENSOR_NOISE'
-                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/60 shadow-sm shadow-purple-500/20'
-                  : 'bg-slate-900 hover:bg-purple-500/10 text-slate-300 hover:text-purple-300 border-slate-800'
+                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/50 shadow-sm'
+                  : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-purple-500/40 hover:text-purple-300'
               }`}
             >
               <Radio className="w-3.5 h-3.5 text-purple-400" />
-              <span>Inject Sensor Noise</span>
+              <span>ADC Sensor Noise</span>
             </button>
 
             <button
               onClick={() => triggerFault('NOMINAL')}
               disabled={activeFault === 'NOMINAL'}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-medium border transition-all ${
                 activeFault === 'NOMINAL'
-                  ? 'bg-slate-900/40 text-slate-600 border-slate-800/50 cursor-not-allowed'
-                  : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border-emerald-500/40'
+                  ? 'bg-slate-900/40 text-slate-600 border-slate-800/60 cursor-not-allowed'
+                  : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/25'
               }`}
             >
               <RotateCcw className="w-3.5 h-3.5" />
-              <span>Normalize Hardware</span>
+              <span>Restore Nominal</span>
             </button>
           </div>
         </div>
       </section>
 
-      {/* ====================================================================
-          MAIN CONTENT CONTAINER
-         ==================================================================== */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
-        {/* ==================================================================
-            TAB 1: DASHBOARD & REAL-TIME DATA ANALYTICS
-           ================================================================== */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6">
-            {/* Active Fault Banner if non-nominal */}
-            {activeFault !== 'NOMINAL' && (
-              <div className="bg-rose-500/10 border border-rose-500/40 rounded-xl px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <ShieldAlert className="w-5 h-5 text-rose-400 shrink-0 animate-pulse" />
-                  <div>
-                    <span className="text-xs font-mono uppercase tracking-wider text-rose-400 font-bold">
-                      Active Hardware Fault Injection // {selectedNodeId}
-                    </span>
-                    <p className="text-xs text-slate-300">
-                      Mode: <strong className="font-mono text-white">{activeFault}</strong> — Watch the rolling Z-Score (Z = (x − μ)/σ) and OLS trendline respond in real time.
-                    </p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => triggerFault('NOMINAL')}
-                  className="self-start sm:self-auto px-3 py-1.5 rounded-lg bg-rose-500 text-slate-950 font-semibold text-xs hover:bg-rose-400 transition-colors shrink-0"
-                >
-                  Restore Nominal State
-                </button>
-              </div>
-            )}
-
-            {/* 4 KPI METRIC CARDS */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {/* Card 1: Temperature & OLS Regression Trend */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-mono uppercase text-slate-400">
-                    Temperature ({selectedNodeId})
-                  </span>
+                <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
+                  <span className="font-mono uppercase tracking-wider">Temperature (DHT22)</span>
                   <span
-                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono ${
-                      Math.abs(tempOls.slopePerMin) > 0.35
-                        ? 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                    className={`font-mono px-2 py-0.5 rounded text-[11px] font-semibold ${
+                      Math.abs(latestPoint.tempZ || 0) >= zThreshold
+                        ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
                         : 'bg-slate-800 text-emerald-400'
                     }`}
                   >
-                    {tempOls.slopePerMin > 0.1 ? (
-                      <TrendingUp className="w-3 h-3" />
-                    ) : tempOls.slopePerMin < -0.1 ? (
-                      <TrendingDown className="w-3 h-3" />
-                    ) : (
-                      <Minus className="w-3 h-3" />
-                    )}
-                    {tempOls.slopePerMin >= 0 ? '+' : ''}
-                    {tempOls.slopePerMin.toFixed(2)}°C/m
+                    Z = {latestPoint.tempZ >= 0 ? `+${latestPoint.tempZ}` : latestPoint.tempZ}σ
                   </span>
                 </div>
-
-                <div className="my-1 flex items-baseline gap-2">
+                <div className="flex items-baseline justify-between my-1">
                   <span className="text-3xl font-bold font-mono text-white">
-                    {latestPoint.temp?.toFixed(2)}
+                    {latestPoint.temp !== undefined ? `${latestPoint.temp.toFixed(2)} °C` : '--'}
                   </span>
-                  <span className="text-sm font-mono text-slate-400">°C</span>
+                  <span className="text-xs font-mono text-slate-400">
+                    μ: {tempStats.mean.toFixed(2)}°C
+                  </span>
                 </div>
-
-                <div className="pt-3 mt-2 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400 font-mono">
-                  <span>Target: {activeNodeCfg.nominalTemp.toFixed(1)}°C</span>
-                  <span className="text-slate-300">
-                    5m Forecast:{' '}
-                    <strong className="text-emerald-400">
-                      {tempOls.forecast5Min.toFixed(1)}°C
-                    </strong>
+                <div className="text-[11px] font-mono text-slate-400 flex items-center justify-between pt-2 border-t border-slate-800/80">
+                  <span>Rolling σ: ±{tempStats.std.toFixed(2)}°C</span>
+                  <span>
+                    Range: {tempStats.min.toFixed(1)}–{tempStats.max.toFixed(1)}°C
                   </span>
                 </div>
               </div>
 
-              {/* Card 2: Real-Time Power & Voltage */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-mono uppercase text-slate-400">
-                    Power & Line Voltage
+                <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
+                  <span className="font-mono uppercase tracking-wider">Load Power (ACS712)</span>
+                  <span className="font-mono px-2 py-0.5 rounded text-[11px] bg-slate-800 text-cyan-300">
+                    {latestPoint.voltage?.toFixed(1)}V • {latestPoint.current?.toFixed(2)}A
+                  </span>
+                </div>
+                <div className="flex items-baseline justify-between my-1">
+                  <span className="text-3xl font-bold font-mono text-white">
+                    {latestPoint.power !== undefined ? `${latestPoint.power.toFixed(1)} W` : '--'}
+                  </span>
+                  <span className="text-xs font-mono text-slate-400">
+                    Z = {latestPoint.powerZ >= 0 ? `+${latestPoint.powerZ}` : latestPoint.powerZ}σ
+                  </span>
+                </div>
+                <div className="text-[11px] font-mono text-slate-400 flex items-center justify-between pt-2 border-t border-slate-800/80">
+                  <span>Est. Energy: {estDailyKwh.toFixed(2)} kWh/day</span>
+                  <span>μ: {powerStats.mean.toFixed(0)}W</span>
+                </div>
+              </div>
+
+              <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+                <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
+                  <span className="font-mono uppercase tracking-wider">OLS 5-Min Forecast</span>
+                  <span className="font-mono px-2 py-0.5 rounded text-[11px] bg-slate-800 text-amber-300">
+                    R² = {tempOls.r2.toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex items-baseline justify-between my-1">
+                  <span className="text-3xl font-bold font-mono text-white">
+                    {tempOls.forecast5Min.toFixed(2)} °C
                   </span>
                   <span
-                    className={`px-2 py-0.5 rounded text-[11px] font-mono ${
-                      latestPoint.voltage < 208
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                        : 'bg-slate-800 text-slate-300'
+                    className={`flex items-center gap-1 text-xs font-mono font-semibold ${
+                      tempOls.slopePerMin > 0.15
+                        ? 'text-rose-400'
+                        : tempOls.slopePerMin < -0.15
+                        ? 'text-cyan-400'
+                        : 'text-emerald-400'
                     }`}
                   >
-                    {latestPoint.voltage?.toFixed(1)} V • {latestPoint.current?.toFixed(2)} A
+                    {tempOls.slopePerMin > 0.05 ? (
+                      <TrendingUp className="w-3.5 h-3.5" />
+                    ) : tempOls.slopePerMin < -0.05 ? (
+                      <TrendingDown className="w-3.5 h-3.5" />
+                    ) : (
+                      <Minus className="w-3.5 h-3.5" />
+                    )}
+                    {tempOls.slopePerMin >= 0 ? '+' : ''}
+                    {tempOls.slopePerMin.toFixed(2)} °C/m
                   </span>
                 </div>
-
-                <div className="my-1 flex items-baseline gap-2">
-                  <span className="text-3xl font-bold font-mono text-white">
-                    {latestPoint.power?.toFixed(1)}
-                  </span>
-                  <span className="text-sm font-mono text-slate-400">Watts</span>
-                </div>
-
-                <div className="pt-3 mt-2 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400 font-mono">
-                  <span>Est. Load: {estDailyKwh.toFixed(1)} kWh/d</span>
-                  <span className="text-slate-300">
-                    Mean: <strong>{powerStats.mean.toFixed(0)}W</strong>
-                  </span>
+                <div className="text-[11px] font-mono text-slate-400 flex items-center justify-between pt-2 border-t border-slate-800/80">
+                  <span>Linear Regression Slope</span>
+                  <span>Window: N={activeSeries.length}</span>
                 </div>
               </div>
 
-              {/* Card 3: Statistical Rolling Z-Score */}
               <div
                 className={`rounded-xl p-4 flex flex-col justify-between border transition-colors ${
                   isCurrentNodeAnomalous
-                    ? 'bg-rose-950/25 border-rose-500/50'
+                    ? 'bg-rose-950/30 border-rose-500/50'
                     : 'bg-slate-900/70 border-slate-800'
                 }`}
               >
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-mono uppercase text-slate-400">
-                    Rolling Z-Score (|Z|)
+                <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
+                  <span className="font-mono uppercase tracking-wider">Edge Health & State</span>
+                  <span className="font-mono text-[11px] text-slate-400 flex items-center gap-1">
+                    <Wifi className="w-3 h-3 text-emerald-400" />
+                    {latestPoint.rssi || activeNodeCfg.baseRssi} dBm
                   </span>
+                </div>
+                <div className="flex items-center justify-between my-1">
                   <span
-                    className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold tracking-wider ${
-                      isCurrentNodeAnomalous
-                        ? 'bg-rose-500 text-slate-950'
-                        : 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                    className={`text-xl font-bold font-mono tracking-tight flex items-center gap-2 ${
+                      isCurrentNodeAnomalous ? 'text-rose-400' : 'text-emerald-400'
                     }`}
                   >
-                    {isCurrentNodeAnomalous ? 'ANOMALY DETECTED' : 'NOMINAL'}
+                    {isCurrentNodeAnomalous ? (
+                      <>
+                        <ShieldAlert className="w-6 h-6 text-rose-400 animate-bounce" />
+                        <span>ANOMALY DETECTED</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-6 h-6 text-emerald-400" />
+                        <span>SYSTEM NOMINAL</span>
+                      </>
+                    )}
                   </span>
                 </div>
-
-                <div className="my-1 flex items-baseline justify-between">
-                  <div className="flex items-baseline gap-1.5">
-                    <span
-                      className={`text-3xl font-bold font-mono ${
-                        isCurrentNodeAnomalous ? 'text-rose-400' : 'text-emerald-400'
-                      }`}
-                    >
-                      {latestPoint.maxAbsZ?.toFixed(2)}
-                    </span>
-                    <span className="text-xs font-mono text-slate-400">σ</span>
-                  </div>
-                  <span className="text-xs font-mono text-slate-400">
-                    Limit: ±{zThreshold.toFixed(1)}σ
-                  </span>
-                </div>
-
-                {/* Visual Z-Score Bar */}
-                <div className="pt-2 mt-1">
-                  <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
-                    <div
-                      className={`h-full transition-all duration-300 ${
-                        isCurrentNodeAnomalous
-                          ? 'bg-rose-500'
-                          : latestPoint.maxAbsZ > zThreshold * 0.75
-                          ? 'bg-amber-400'
-                          : 'bg-emerald-400'
-                      }`}
-                      style={{
-                        width: `${Math.min(100, ((latestPoint.maxAbsZ || 0) / 4.5) * 100)}%`
-                      }}
-                    />
-                  </div>
-                  <div className="flex justify-between text-[10px] font-mono text-slate-400 mt-1.5">
-                    <span>Temp Z: {latestPoint.tempZ?.toFixed(2)}σ</span>
-                    <span>Power Z: {latestPoint.powerZ?.toFixed(2)}σ</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Card 4: ESP32 Hardware Diagnostics */}
-              <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-mono uppercase text-slate-400">
-                    ESP32 Diagnostics
-                  </span>
-                  <span className="inline-flex items-center gap-1 text-xs font-mono text-emerald-400">
-                    <Wifi className="w-3.5 h-3.5" />
-                    {latestPoint.rssi} dBm
-                  </span>
-                </div>
-
-                <div className="my-1 grid grid-cols-2 gap-2 font-mono">
-                  <div className="bg-slate-950/60 border border-slate-800/80 rounded-lg px-2.5 py-1.5">
-                    <div className="text-[10px] text-slate-400">FREE HEAP</div>
-                    <div className="text-sm font-bold text-white">{latestPoint.heapKB} KB</div>
-                  </div>
-                  <div className="bg-slate-950/60 border border-slate-800/80 rounded-lg px-2.5 py-1.5">
-                    <div className="text-[10px] text-slate-400">PACKETS RX</div>
-                    <div className="text-sm font-bold text-emerald-400">#{latestPoint.seq}</div>
-                  </div>
-                </div>
-
-                <div className="pt-2 mt-1 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400 font-mono">
-                  <span>MAC: {activeNodeCfg.mac}</span>
-                  <span className="text-emerald-400">0.0% Loss</span>
+                <div className="text-[11px] font-mono text-slate-400 flex items-center justify-between pt-2 border-t border-slate-800/80">
+                  <span>SRAM Heap: {latestPoint.heapKB || activeNodeCfg.freeHeap} KB</span>
+                  <span>Mode: {serialConnected ? 'USB_SERIAL' : activeFault}</span>
                 </div>
               </div>
             </div>
 
-            {/* INTERACTIVE SVG TIME-SERIES CHART + STATISTICAL SUMMARY PANEL */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Left 2 Columns: Dual SVG Time-Series Chart */}
-              <div className="lg:col-span-2 bg-slate-900/70 border border-slate-800 rounded-xl p-5 flex flex-col justify-between">
-                {/* Chart Header & Controls */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h2 className="text-base font-bold text-white">
-                        Real-Time Telemetry & Statistical Confidence Band
-                      </h2>
-                      <span className="text-xs font-mono px-2 py-0.5 rounded bg-slate-800 text-emerald-400">
-                        N = {activeSeries.length} samples
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              <div className="lg:col-span-8 bg-slate-900/70 border border-slate-800 rounded-xl p-4 sm:p-5 flex flex-col justify-between">
+                <div>
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-4 border-b border-slate-800">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-base font-bold text-white">
+                          Real-Time Telemetry & Rolling Confidence Envelope
+                        </h2>
+                        <span className="text-xs font-mono px-2 py-0.5 rounded bg-slate-800 text-emerald-400 border border-slate-700">
+                          {selectedNodeId}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        {activeNodeCfg.name} ({activeNodeCfg.location}) — Hover over chart to inspect sample frames
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex items-center bg-slate-950 border border-slate-800 rounded-lg p-0.5 text-xs font-mono">
+                        {[
+                          { id: 'dual', label: 'Dual-Axis' },
+                          { id: 'temp', label: 'Temp Only' },
+                          { id: 'power', label: 'Power Only' }
+                        ].map((m) => (
+                          <button
+                            key={m.id}
+                            onClick={() => setChartMetric(m.id)}
+                            className={`px-2.5 py-1 rounded-md transition-colors ${
+                              chartMetric === m.id
+                                ? 'bg-slate-800 text-emerald-400 font-semibold'
+                                : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            {m.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      <button
+                        onClick={() => setShowOlsLine((v) => !v)}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-mono border transition-colors ${
+                          showOlsLine
+                            ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                            : 'bg-slate-950 text-slate-400 border-slate-800'
+                        }`}
+                      >
+                        OLS Trendline
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-4 py-3 text-xs font-mono border-b border-slate-800/60">
+                    <div className="flex flex-wrap items-center gap-4">
+                      {chartMetric !== 'power' && (
+                        <span className="flex items-center gap-1.5 text-emerald-400">
+                          <span className="w-3 h-0.5 bg-emerald-400 inline-block" />
+                          Temp (°C)
+                        </span>
+                      )}
+                      {chartMetric !== 'temp' && (
+                        <span className="flex items-center gap-1.5 text-cyan-400">
+                          <span className="w-3 h-0.5 bg-cyan-400 inline-block" />
+                          Power (W)
+                        </span>
+                      )}
+                      {showOlsLine && chartMetric !== 'power' && (
+                        <span className="flex items-center gap-1.5 text-amber-400">
+                          <span className="w-3 h-0.5 border-b border-dashed border-amber-400 inline-block" />
+                          OLS Regression
+                        </span>
+                      )}
+                      <span className="flex items-center gap-1.5 text-slate-400">
+                        <span className="w-3 h-2 bg-emerald-500/15 border border-emerald-500/30 inline-block rounded-xs" />
+                        μ ± {zThreshold.toFixed(1)}σ Band
+                      </span>
+                      <span className="flex items-center gap-1.5 text-rose-400">
+                        <span className="w-2 h-2 rounded-full bg-rose-500 inline-block" />
+                        |Z| ≥ {zThreshold.toFixed(1)} Anomaly
                       </span>
                     </div>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      Shaded region shows rolling μ ± {zThreshold.toFixed(1)}σ normal operating envelope; pulsing red markers indicate |Z| ≥ {zThreshold.toFixed(1)}.
-                    </p>
+
+                    <div className="flex items-center gap-2">
+                      <label className="text-slate-400">Z-Threshold:</label>
+                      <input
+                        type="range"
+                        min="1.5"
+                        max="3.5"
+                        step="0.1"
+                        value={zThreshold}
+                        onChange={(e) => setZThreshold( parseFloat(e.target.value) )}
+                        className="w-24 accent-emerald-500 cursor-pointer"
+                      />
+                      <span className="text-emerald-400 font-bold">{zThreshold.toFixed(1)}σ</span>
+                    </div>
                   </div>
 
-                  {/* Layer Toggles */}
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <button
-                      onClick={() => setChartMetric('dual')}
-                      className={`px-2.5 py-1 rounded text-xs font-mono transition-colors ${
-                        chartMetric === 'dual'
-                          ? 'bg-emerald-500 text-slate-950 font-semibold'
-                          : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                      }`}
+                  <div className="relative mt-3 select-none">
+                    <svg
+                      viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+                      className="w-full h-64 sm:h-72 overflow-visible"
+                      onMouseLeave={() => setHoverIndex(null)}
                     >
-                      Dual (Temp + W)
-                    </button>
-                    <button
-                      onClick={() => setChartMetric('temp')}
-                      className={`px-2.5 py-1 rounded text-xs font-mono transition-colors ${
-                        chartMetric === 'temp'
-                          ? 'bg-emerald-500 text-slate-950 font-semibold'
-                          : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                      }`}
-                    >
-                      Temp Only
-                    </button>
-                    <button
-                      onClick={() => setShowOlsLine((v) => !v)}
-                      className={`px-2.5 py-1 rounded text-xs font-mono border transition-colors ${
-                        showOlsLine
-                          ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
-                          : 'bg-slate-900 text-slate-400 border-slate-800'
-                      }`}
-                    >
-                      OLS Trendline
-                    </button>
-                  </div>
-                </div>
+                      {[0, 0.25, 0.5, 0.75, 1].map((step, i) => {
+                        const yPos = padTop + step * plotH;
+                        const tempLabel = (maxTempY - step * (maxTempY - minTempY)).toFixed(1);
+                        const powerLabel = (maxPowerY - step * (maxPowerY - minPowerY)).toFixed(0);
+                        return (
+                          <g key={i}>
+                            <line
+                              x1={padLeft}
+                              y1={yPos}
+                              x2={svgWidth - padRight}
+                              y2={yPos}
+                              stroke="#1e293b"
+                              strokeDasharray="4 4"
+                              strokeWidth="1"
+                            />
+                            {chartMetric !== 'power' && (
+                              <text
+                                x={padLeft - 8}
+                                y={yPos + 4}
+                                textAnchor="end"
+                                className="fill-emerald-400/80 text-[10px] font-mono"
+                              >
+                                {tempLabel}°
+                              </text>
+                            )}
+                            {chartMetric !== 'temp' && (
+                              <text
+                                x={svgWidth - padRight + 8}
+                                y={yPos + 4}
+                                textAnchor="start"
+                                className="fill-cyan-400/80 text-[10px] font-mono"
+                              >
+                                {powerLabel}W
+                              </text>
+                            )}
+                          </g>
+                        );
+                      })}
 
-                {/* SVG Canvas */}
-                <div className="relative w-full overflow-hidden bg-slate-950/80 border border-slate-800/90 rounded-lg p-2">
-                  <svg
-                    viewBox={`0 0 ${svgWidth} ${svgHeight}`}
-                    className="w-full h-64 sm:h-72 select-none overflow-visible"
-                    onMouseLeave={() => setHoverIndex(null)}
-                  >
-                    <defs>
-                      <linearGradient id="tempBandGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#10b981" stopOpacity="0.16" />
-                        <stop offset="50%" stopColor="#10b981" stopOpacity="0.06" />
-                        <stop offset="100%" stopColor="#10b981" stopOpacity="0.16" />
-                      </linearGradient>
-                    </defs>
-
-                    {/* Horizontal Grid Lines & Left/Right Axis Labels */}
-                    {[0, 0.25, 0.5, 0.75, 1].map((step, i) => {
-                      const y = padTop + step * plotH;
-                      const tempLabel = (maxTempY - step * (maxTempY - minTempY)).toFixed(1);
-                      const powerLabel = (maxPowerY - step * (maxPowerY - minPowerY)).toFixed(0);
-                      return (
-                        <g key={i}>
+                      {chartMetric !== 'power' && (
+                        <>
+                          <rect
+                            x={padLeft}
+                            y={Math.min(bandTopY, bandBottomY)}
+                            width={plotW}
+                            height={Math.max(2, Math.abs(bandBottomY - bandTopY))}
+                            fill="#10b981"
+                            fillOpacity="0.09"
+                            stroke="#10b981"
+                            strokeOpacity="0.25"
+                            strokeDasharray="3 3"
+                          />
                           <line
                             x1={padLeft}
-                            y1={y}
+                            y1={meanLineY}
                             x2={svgWidth - padRight}
-                            y2={y}
-                            stroke="#1e293b"
-                            strokeDasharray="3 3"
+                            y2={meanLineY}
+                            stroke="#10b981"
+                            strokeOpacity="0.35"
+                            strokeDasharray="2 4"
                             strokeWidth="1"
                           />
-                          {/* Left Axis: Temperature */}
-                          <text
-                            x={padLeft - 8}
-                            y={y + 4}
-                            textAnchor="end"
-                            className="fill-emerald-400 font-mono text-[10px]"
-                          >
-                            {tempLabel}°C
-                          </text>
-                          {/* Right Axis: Power */}
-                          {chartMetric === 'dual' && (
-                            <text
-                              x={svgWidth - padRight + 8}
-                              y={y + 4}
-                              textAnchor="start"
-                              className="fill-amber-400 font-mono text-[10px]"
-                            >
-                              {powerLabel}W
-                            </text>
-                          )}
-                        </g>
-                      );
-                    })}
+                        </>
+                      )}
 
-                    {/* Shaded Rolling Mean ± k*Sigma Confidence Band */}
-                    <rect
-                      x={padLeft}
-                      y={Math.min(bandTopY, bandBottomY)}
-                      width={plotW}
-                      height={Math.max(2, Math.abs(bandBottomY - bandTopY))}
-                      fill="url(#tempBandGrad)"
-                      stroke="#10b981"
-                      strokeOpacity="0.25"
-                      strokeDasharray="4 4"
-                    />
-
-                    {/* Rolling Mean Centerline */}
-                    <line
-                      x1={padLeft}
-                      y1={meanLineY}
-                      x2={svgWidth - padRight}
-                      y2={meanLineY}
-                      stroke="#10b981"
-                      strokeOpacity="0.4"
-                      strokeDasharray="2 4"
-                      strokeWidth="1"
-                    />
-
-                    {/* Power Draw Line (Secondary Axis) */}
-                    {chartMetric === 'dual' && activeSeries.length > 1 && (
-                      <polyline
-                        fill="none"
-                        stroke="#f59e0b"
-                        strokeWidth="1.75"
-                        strokeOpacity="0.75"
-                        points={powerPointsStr}
-                      />
-                    )}
-
-                    {/* OLS Linear Regression Trendline */}
-                    {showOlsLine && tempOls.line.length > 1 && (
-                      <polyline
-                        fill="none"
-                        stroke="#38bdf8"
-                        strokeWidth="1.75"
-                        strokeDasharray="6 4"
-                        points={olsPointsStr}
-                      />
-                    )}
-
-                    {/* Primary Temperature Line */}
-                    {activeSeries.length > 1 && (
-                      <polyline
-                        fill="none"
-                        stroke="#10b981"
-                        strokeWidth="2.5"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        points={tempPointsStr}
-                      />
-                    )}
-
-                    {/* Data Points & Pulsing Red Anomaly Markers */}
-                    {activeSeries.map((pt, idx) => {
-                      const cx = getX(idx, activeSeries.length);
-                      const cy = getTempY(pt.temp);
-                      const isPtAnomaly = pt.maxAbsZ >= zThreshold;
-
-                      return (
-                        <g key={pt.seq}>
-                          {isPtAnomaly && (
-                            <>
-                              <circle
-                                cx={cx}
-                                cy={cy}
-                                r="8"
-                                fill="#f43f5e"
-                                fillOpacity="0.28"
-                              />
-                              <circle
-                                cx={cx}
-                                cy={cy}
-                                r="4.5"
-                                fill="#f43f5e"
-                                stroke="#0f172a"
-                                strokeWidth="1.5"
-                              />
-                            </>
-                          )}
-                          {!isPtAnomaly && idx === activeSeries.length - 1 && (
-                            <circle
-                              cx={cx}
-                              cy={cy}
-                              r="4"
-                              fill="#10b981"
-                              stroke="#0f172a"
-                              strokeWidth="1.5"
-                            />
-                          )}
-                        </g>
-                      );
-                    })}
-
-                    {/* Hover Inspection Crosshair */}
-                    {hoverIndex !== null && activeSeries[hoverIndex] && (
-                      <g>
-                        <line
-                          x1={getX(hoverIndex, activeSeries.length)}
-                          y1={padTop}
-                          x2={getX(hoverIndex, activeSeries.length)}
-                          y2={padTop + plotH}
-                          stroke="#94a3b8"
-                          strokeWidth="1"
-                          strokeDasharray="3 3"
+                      {chartMetric !== 'temp' && activeSeries.length > 1 && (
+                        <polyline
+                          fill="none"
+                          stroke="#22d3ee"
+                          strokeWidth="1.8"
+                          strokeOpacity="0.85"
+                          points={powerPointsStr}
                         />
-                        <circle
-                          cx={getX(hoverIndex, activeSeries.length)}
-                          cy={getTempY(activeSeries[hoverIndex].temp)}
-                          r="5"
-                          fill="#ffffff"
+                      )}
+
+                      {chartMetric !== 'power' && activeSeries.length > 1 && (
+                        <polyline
+                          fill="none"
                           stroke="#10b981"
-                          strokeWidth="2"
+                          strokeWidth="2.5"
+                          points={tempPointsStr}
                         />
-                      </g>
-                    )}
+                      )}
 
-                    {/* Invisible Hover Slice Columns for Smooth Point Inspection */}
-                    {activeSeries.map((_, idx) => {
-                      const sliceW = plotW / Math.max(1, activeSeries.length);
-                      const x = padLeft + idx * sliceW - sliceW / 2;
-                      return (
-                        <rect
-                          key={idx}
-                          x={Math.max(padLeft, x)}
-                          y={padTop}
-                          width={sliceW}
-                          height={plotH}
-                          fill="transparent"
-                          className="cursor-crosshair"
-                          onMouseEnter={() => setHoverIndex(idx)}
+                      {showOlsLine && chartMetric !== 'power' && tempOls.line.length > 1 && (
+                        <polyline
+                          fill="none"
+                          stroke="#fbbf24"
+                          strokeWidth="1.8"
+                          strokeDasharray="6 4"
+                          points={olsPointsStr}
                         />
-                      );
-                    })}
-                  </svg>
+                      )}
 
-                  {/* Interactive Hover / Latest Point Inspector Bar */}
-                  <div className="mt-2 pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
-                    <div className="flex items-center gap-2">
-                      <span className="px-2 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-800">
-                        {hoverIndex !== null ? 'INSPECTING SAMPLE' : 'LATEST SAMPLE'} #{inspectedPoint.seq}
-                      </span>
-                      <span className="text-slate-400">{inspectedPoint.timeLabel}</span>
-                    </div>
+                      {activeSeries.map((pt, idx) => {
+                        const cx = getX(idx, activeSeries.length);
+                        const cyTemp = getTempY(pt.temp);
+                        const cyPower = getPowerY(pt.power);
+                        const isAnom = pt.maxAbsZ >= zThreshold;
 
-                    <div className="flex flex-wrap items-center gap-4">
-                      <span className="text-emerald-400">
-                        Temp: <strong>{inspectedPoint.temp?.toFixed(2)}°C</strong>
-                      </span>
-                      <span className="text-amber-400">
-                        Power: <strong>{inspectedPoint.power?.toFixed(1)}W</strong>
-                      </span>
-                      <span className="text-slate-300">
-                        Volt: <strong>{inspectedPoint.voltage?.toFixed(1)}V</strong>
-                      </span>
-                      <span
-                        className={
-                          inspectedPoint.maxAbsZ >= zThreshold
-                            ? 'text-rose-400 font-bold'
-                            : 'text-slate-400'
-                        }
-                      >
-                        Z-Score: {inspectedPoint.maxAbsZ?.toFixed(2)}σ
-                      </span>
-                    </div>
+                        return (
+                          <g key={pt.seq}>
+                            {isAnom && (
+                              <>
+                                <circle
+                                  cx={cx}
+                                  cy={chartMetric === 'power' ? cyPower : cyTemp}
+                                  r="6"
+                                  fill="#f43f5e"
+                                  fillOpacity="0.25"
+                                />
+                                <circle
+                                  cx={cx}
+                                  cy={chartMetric === 'power' ? cyPower : cyTemp}
+                                  r="3.5"
+                                  fill="#f43f5e"
+                                  stroke="#0f172a"
+                                  strokeWidth="1.5"
+                                />
+                              </>
+                            )}
+
+                            {hoverIndex === idx && (
+                              <>
+                                <line
+                                  x1={cx}
+                                  y1={padTop}
+                                  x2={cx}
+                                  y2={padTop + plotH}
+                                  stroke="#94a3b8"
+                                  strokeWidth="1"
+                                  strokeDasharray="2 2"
+                                />
+                                {chartMetric !== 'power' && (
+                                  <circle
+                                    cx={cx}
+                                    cy={cyTemp}
+                                    r="4.5"
+                                    fill="#10b981"
+                                    stroke="#020617"
+                                    strokeWidth="2"
+                                  />
+                                )}
+                                {chartMetric !== 'temp' && (
+                                  <circle
+                                    cx={cx}
+                                    cy={cyPower}
+                                    r="4"
+                                    fill="#22d3ee"
+                                    stroke="#020617"
+                                    strokeWidth="2"
+                                  />
+                                )}
+                              </>
+                            )}
+
+                            <rect
+                              x={cx - plotW / Math.max(2, activeSeries.length) / 2}
+                              y={padTop}
+                              width={plotW / Math.max(2, activeSeries.length)}
+                              height={plotH}
+                              fill="transparent"
+                              className="cursor-crosshair"
+                              onMouseEnter={() => setHoverIndex(idx)}
+                            />
+                          </g>
+                        );
+                      })}
+
+                      {activeSeries.map((pt, idx) => {
+                        if (idx % 8 !== 0 && idx !== activeSeries.length - 1) return null;
+                        const xPos = getX(idx, activeSeries.length);
+                        return (
+                          <text
+                            key={`lbl-${pt.seq}`}
+                            x={xPos}
+                            y={svgHeight - 8}
+                            textAnchor="middle"
+                            className="fill-slate-500 text-[10px] font-mono"
+                          >
+                            {pt.timeLabel}
+                          </text>
+                        );
+                      })}
+                    </svg>
                   </div>
                 </div>
 
-                {/* Chart Legend */}
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400">
-                  <div className="flex flex-wrap items-center gap-4">
-                    <span className="flex items-center gap-1.5">
-                      <span className="w-3 h-0.5 bg-emerald-400 inline-block" />
-                      Temperature (°C)
+                <div className="mt-3 pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs font-mono bg-slate-950/60 px-3 py-2 rounded-lg">
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-400">
+                      {hoverIndex !== null ? 'INSPECTING SAMPLE:' : 'LATEST PACKET:'}
                     </span>
-                    {chartMetric === 'dual' && (
-                      <span className="flex items-center gap-1.5">
-                        <span className="w-3 h-0.5 bg-amber-400 inline-block" />
-                        Power Draw (W)
-                      </span>
-                    )}
-                    {showOlsLine && (
-                      <span className="flex items-center gap-1.5">
-                        <span className="w-3 h-0.5 bg-sky-400 border-b border-dashed inline-block" />
-                        OLS Regression Trend
-                      </span>
-                    )}
-                    <span className="flex items-center gap-1.5">
-                      <span className="w-2.5 h-2.5 rounded-full bg-rose-500 inline-block" />
-                      Anomaly (|Z| ≥ {zThreshold.toFixed(1)}σ)
+                    <span className="text-white font-semibold">
+                      #{inspectedPoint.seq} ({inspectedPoint.timeLabel})
                     </span>
                   </div>
-                  <span className="font-mono text-[11px] text-slate-400">
-                    Hover chart to inspect individual packets
-                  </span>
+                  <div className="flex flex-wrap items-center gap-4">
+                    <span className="text-emerald-400">
+                      Temp: <strong>{inspectedPoint.temp?.toFixed(2)}°C</strong> (Z={inspectedPoint.tempZ}σ)
+                    </span>
+                    <span className="text-cyan-400">
+                      Power: <strong>{inspectedPoint.power?.toFixed(1)}W</strong> ({inspectedPoint.voltage?.toFixed(1)}V)
+                    </span>
+                    <span
+                      className={`px-2 py-0.5 rounded text-[11px] font-bold ${
+                        (inspectedPoint.maxAbsZ || 0) >= zThreshold
+                          ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                          : 'bg-emerald-500/15 text-emerald-300'
+                      }`}
+                    >
+                      {inspectedPoint.faultMode || 'NOMINAL'}
+                    </span>
+                  </div>
                 </div>
               </div>
 
-              {/* Right Column: Statistical Summary & Sensitivity Controls */}
-              <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 flex flex-col justify-between space-y-5">
-                <div>
-                  <div className="flex items-center justify-between mb-3">
-                    <h2 className="text-base font-bold text-white flex items-center gap-2">
+              <div className="lg:col-span-4 flex flex-col gap-6">
+                <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4 sm:p-5">
+                  <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-800">
+                    <div className="flex items-center gap-2">
                       <Gauge className="w-4 h-4 text-emerald-400" />
-                      Statistical Engine
-                    </h2>
-                    <span className="text-xs font-mono text-slate-400">{selectedNodeId}</span>
+                      <h3 className="text-sm font-bold text-white">
+                        Statistical Anomaly Engine
+                      </h3>
+                    </div>
+                    <span className="text-[11px] font-mono text-slate-400">N = {activeSeries.length}</span>
                   </div>
 
-                  {/* Z-Score Threshold Slider */}
-                  <div className="bg-slate-950/70 border border-slate-800 rounded-lg p-3.5 mb-4">
-                    <div className="flex items-center justify-between text-xs mb-2">
-                      <span className="font-medium text-slate-300">
-                        Anomaly Sensitivity Threshold
-                      </span>
-                      <span className="font-mono font-bold text-emerald-400">
-                        ±{zThreshold.toFixed(1)}σ
-                      </span>
+                  <div className="space-y-3 text-xs">
+                    <div className="bg-slate-950/80 border border-slate-800/80 rounded-lg p-3 font-mono">
+                      <div className="text-slate-400 text-[11px] mb-1">
+                        Rolling Z-Score Formula:
+                      </div>
+                      <div className="text-emerald-300 text-sm font-bold">
+                        Z = (x_t - μ_window) / σ_window
+                      </div>
+                      <div className="mt-2 pt-2 border-t border-slate-800/80 grid grid-cols-2 gap-2 text-[11px]">
+                        <div>
+                          <span className="text-slate-400">Upper Cutoff:</span>{' '}
+                          <span className="text-white font-semibold">{tempBandHigh.toFixed(2)}°C</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-400">Lower Cutoff:</span>{' '}
+                          <span className="text-white font-semibold">{tempBandLow.toFixed(2)}°C</span>
+                        </div>
+                      </div>
                     </div>
-                    <input
-                      type="range"
-                      min="1.5"
-                      max="3.5"
-                      step="0.1"
-                      value={zThreshold}
-                      onChange={(e) => setZThreshold(parseFloat(e.target.value))}
-                      className="w-full accent-emerald-400 cursor-pointer"
-                    />
-                    <div className="flex justify-between text-[10px] font-mono text-slate-400 mt-1">
-                      <span>1.5σ (Strict)</span>
-                      <span>2.2σ (Default)</span>
-                      <span>3.5σ (Permissive)</span>
-                    </div>
-                  </div>
 
-                  {/* Rolling Parameter Table */}
-                  <div className="space-y-2.5 text-xs font-mono">
-                    <div className="flex items-center justify-between py-1.5 border-b border-slate-800/80">
-                      <span className="text-slate-400">Temp Rolling Mean (μ)</span>
-                      <span className="text-white font-semibold">{tempStats.mean.toFixed(2)} °C</span>
+                    <div className="bg-slate-950/80 border border-slate-800/80 rounded-lg p-3 font-mono">
+                      <div className="text-slate-400 text-[11px] mb-1">
+                        OLS Linear Drift Projection:
+                      </div>
+                      <div className="text-amber-300 text-sm font-bold">
+                        y(t) = {tempOls.intercept.toFixed(2)} + ({tempOls.slopePerStep.toFixed(3)})·t
+                      </div>
+                      <div className="mt-2 pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px]">
+                        <span className="text-slate-400">Fit Quality (R²):</span>
+                        <span className="text-white font-semibold">{(tempOls.r2 * 100).toFixed(1)}%</span>
+                      </div>
                     </div>
-                    <div className="flex items-center justify-between py-1.5 border-b border-slate-800/80">
-                      <span className="text-slate-400">Temp Std Deviation (σ)</span>
-                      <span className="text-white font-semibold">±{tempStats.std.toFixed(2)} °C</span>
-                    </div>
-                    <div className="flex items-center justify-between py-1.5 border-b border-slate-800/80">
-                      <span className="text-slate-400">Window Min / Max</span>
-                      <span className="text-slate-200">
-                        {tempStats.min.toFixed(1)}°C / {tempStats.max.toFixed(1)}°C
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between py-1.5 border-b border-slate-800/80">
-                      <span className="text-slate-400">OLS Slope (ΔT / min)</span>
-                      <span
-                        className={
-                          Math.abs(tempOls.slopePerMin) > 0.35
-                            ? 'text-rose-400 font-bold'
-                            : 'text-sky-400'
-                        }
+
+                    <div className="pt-1 flex items-center gap-2">
+                      <button
+                        onClick={handleExportTelemetryCSV}
+                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-mono font-semibold bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition-colors cursor-pointer"
                       >
-                        {tempOls.slopePerMin >= 0 ? '+' : ''}
-                        {tempOls.slopePerMin.toFixed(2)} °C/min
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between py-1.5 border-b border-slate-800/80">
-                      <span className="text-slate-400">OLS Goodness of Fit (R²)</span>
-                      <span className="text-slate-200">{(tempOls.r2 * 100).toFixed(1)}%</span>
-                    </div>
-                    <div className="flex items-center justify-between py-1.5">
-                      <span className="text-slate-400">Power Rolling Mean (μ_P)</span>
-                      <span className="text-amber-400 font-semibold">
-                        {powerStats.mean.toFixed(1)} W (±{powerStats.std.toFixed(1)}W)
-                      </span>
+                        <FileSpreadsheet className="w-3.5 h-3.5" />
+                        <span>Export CSV</span>
+                      </button>
+                      <button
+                        onClick={handleExportDatasetJSON}
+                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-mono font-semibold bg-slate-800 text-slate-200 hover:bg-slate-700 border border-slate-700 transition-colors cursor-pointer"
+                      >
+                        <FileJson className="w-3.5 h-3.5" />
+                        <span>Export JSON</span>
+                      </button>
                     </div>
                   </div>
                 </div>
 
-                {/* Live Serial Telemetry JSON Frame Preview */}
-                <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 font-mono text-[11px]">
-                  <div className="flex items-center justify-between text-slate-400 mb-1.5 pb-1 border-b border-slate-800">
-                    <span className="flex items-center gap-1.5">
-                      <Terminal className="w-3.5 h-3.5 text-emerald-400" />
-                      UART / REST JSON Frame
-                    </span>
-                    <span className="text-[10px] text-emerald-400">115200 baud</span>
+                <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4 sm:p-5 flex-1 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-800">
+                      <div className="flex items-center gap-2">
+                        <Terminal className="w-4 h-4 text-emerald-400" />
+                        <h3 className="text-sm font-bold text-white">
+                          ESP32 JSON Telemetry Frame
+                        </h3>
+                      </div>
+                      <span className="text-[11px] font-mono text-emerald-400">
+                        {serialConnected ? 'USB UART' : 'HTTP POST'}
+                      </span>
+                    </div>
+
+                    <pre className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-[11px] font-mono text-slate-300 overflow-x-auto leading-relaxed">
+{JSON.stringify(
+  {
+    node_id: selectedNodeId,
+    mac: activeNodeCfg.mac,
+    seq: latestPoint.seq || 1,
+    temperature_c: latestPoint.temp,
+    voltage_v: latestPoint.voltage,
+    current_a: latestPoint.current,
+    power_w: latestPoint.power,
+    z_score: latestPoint.tempZ,
+    is_anomaly: latestPoint.isAnomaly,
+    rssi_dbm: latestPoint.rssi
+  },
+  null,
+  2
+)}
+                    </pre>
                   </div>
-                  <pre className="text-slate-300 overflow-x-auto leading-relaxed">
-{`{
-  "node": "${selectedNodeId}",
-  "seq": ${latestPoint.seq || 1},
-  "temp_c": ${latestPoint.temp?.toFixed(2)},
-  "power_w": ${latestPoint.power?.toFixed(1)},
-  "z_score": ${latestPoint.maxAbsZ?.toFixed(2)},
-  "anomaly": ${isCurrentNodeAnomalous}
-}`}
-                  </pre>
+
+                  <div className="mt-3 pt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] font-mono text-slate-400">
+                    <span>FW: {activeNodeCfg.firmware}</span>
+                    <button
+                      onClick={() => setActiveTab('firmware')}
+                      className="text-emerald-400 hover:underline"
+                    >
+                      Configure GPIO & Sketch →
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
         )}
 
-        {/* ==================================================================
-            TAB 2: ANOMALY LOG & DATASET EXPORT
-           ================================================================== */}
         {activeTab === 'anomalies' && (
-          <div className="space-y-6">
-            {/* Top Action & Dataset Export Bar */}
-            <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+          <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4 sm:p-6 space-y-5">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 pb-4 border-b border-slate-800">
               <div>
                 <h2 className="text-lg font-bold text-white flex items-center gap-2">
-                  <AlertTriangle className="w-5 h-5 text-amber-400" />
-                  Statistical Anomaly Audit Log & Dataset Exporter
+                  <AlertTriangle className="w-5 h-5 text-rose-400" />
+                  <span>Automated Anomaly Audit Log & Dataset Exporter</span>
                 </h2>
-                <p className="text-xs text-slate-400 mt-1">
-                  Every telemetry packet exceeding |Z| ≥ {zThreshold.toFixed(1)}σ is captured below. Export the full time-series dataset as CSV or JSON for Python/Pandas, R, or Jupyter analysis.
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Captures every telemetry packet where |Z-Score| crosses the configured threshold ({zThreshold.toFixed(1)}σ).
                 </p>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2.5">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   onClick={handleExportTelemetryCSV}
-                  className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs transition-all shadow-sm"
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-mono font-semibold bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition-colors"
                 >
-                  <FileSpreadsheet className="w-4 h-4" />
-                  <span>Download Telemetry CSV</span>
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download Telemetry (.CSV)</span>
                 </button>
-
                 <button
                   onClick={handleExportDatasetJSON}
-                  className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 font-semibold text-xs transition-all"
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-mono font-semibold bg-slate-800 text-slate-200 hover:bg-slate-700 border border-slate-700 transition-colors"
                 >
-                  <FileJson className="w-4 h-4 text-emerald-400" />
-                  <span>Download Full JSON</span>
+                  <FileJson className="w-3.5 h-3.5" />
+                  <span>Download Full State (.JSON)</span>
                 </button>
-
                 <button
                   onClick={() => setAnomalyLogs([])}
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-900 hover:bg-rose-500/15 text-slate-400 hover:text-rose-300 border border-slate-800 text-xs transition-colors"
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-mono text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 transition-colors"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   <span>Clear Log</span>
@@ -2012,38 +2347,37 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.anomaly_events;`;
               </div>
             </div>
 
-            {/* Filters Bar */}
-            <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/40 border border-slate-800 rounded-xl px-4 py-3">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="text-xs font-mono text-slate-400 flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-3 text-xs font-mono">
+                <span className="flex items-center gap-1.5 text-slate-400">
                   <Filter className="w-3.5 h-3.5 text-emerald-400" />
                   Filter Node:
                 </span>
-                {['ALL', 'ESP32-NODE-01', 'ESP32-NODE-02', 'ESP32-NODE-03'].map((nodeOption) => (
+                {['ALL', ...Object.keys(NODE_CONFIGS)].map((nodeKey) => (
                   <button
-                    key={nodeOption}
-                    onClick={() => setLogNodeFilter(nodeOption)}
-                    className={`px-2.5 py-1 rounded text-xs font-mono transition-colors ${
-                      logNodeFilter === nodeOption
-                        ? 'bg-emerald-500 text-slate-950 font-semibold'
-                        : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                    key={nodeKey}
+                    onClick={() => setLogNodeFilter(nodeKey)}
+                    className={`px-2.5 py-1 rounded-md border transition-colors ${
+                      logNodeFilter === nodeKey
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 font-semibold'
+                        : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200'
                     }`}
                   >
-                    {nodeOption}
+                    {nodeKey}
                   </button>
                 ))}
               </div>
 
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-mono text-slate-400">Severity:</span>
+              <div className="flex items-center gap-2 text-xs font-mono">
+                <span className="text-slate-400">Severity:</span>
                 {['ALL', 'WARNING', 'CRITICAL'].map((sev) => (
                   <button
                     key={sev}
                     onClick={() => setLogSeverityFilter(sev)}
-                    className={`px-2.5 py-1 rounded text-xs font-mono transition-colors ${
+                    className={`px-2.5 py-1 rounded-md border transition-colors ${
                       logSeverityFilter === sev
-                        ? 'bg-slate-800 text-white font-semibold border border-slate-600'
-                        : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
+                        ? 'bg-slate-800 text-white border-slate-600 font-semibold'
+                        : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200'
                     }`}
                   >
                     {sev}
@@ -2052,291 +2386,277 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.anomaly_events;`;
               </div>
             </div>
 
-            {/* Anomaly Events Table */}
-            <div className="bg-slate-900/70 border border-slate-800 rounded-xl overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="border-b border-slate-800 bg-slate-950/60 text-[11px] font-mono uppercase text-slate-400">
-                      <th className="py-3 px-4">Timestamp</th>
-                      <th className="py-3 px-4">Node ID</th>
-                      <th className="py-3 px-4">Metric</th>
-                      <th className="py-3 px-4">Observed</th>
-                      <th className="py-3 px-4">Rolling Mean (μ)</th>
-                      <th className="py-3 px-4">Z-Score (Z)</th>
-                      <th className="py-3 px-4">Fault Mode</th>
-                      <th className="py-3 px-4">Severity</th>
+            <div className="overflow-x-auto border border-slate-800 rounded-xl">
+              <table className="w-full text-left border-collapse text-xs font-mono">
+                <thead>
+                  <tr className="bg-slate-950 text-slate-400 border-b border-slate-800 uppercase">
+                    <th className="py-3 px-4">Timestamp</th>
+                    <th className="py-3 px-4">Node ID</th>
+                    <th className="py-3 px-4">Metric</th>
+                    <th className="py-3 px-4">Observed</th>
+                    <th className="py-3 px-4">Rolling Mean (μ)</th>
+                    <th className="py-3 px-4">Z-Score</th>
+                    <th className="py-3 px-4">Fault Mode</th>
+                    <th className="py-3 px-4">Severity</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/70">
+                  {filteredAnomalies.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-10 text-center text-slate-500">
+                        No anomaly events match the current filter. Inject a fault on the top bar to test detection!
+                      </td>
                     </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/70 text-xs font-mono">
-                    {filteredAnomalies.length === 0 ? (
-                      <tr>
-                        <td colSpan={8} className="py-12 text-center text-slate-400 font-sans">
-                          No anomaly events match the current filter. Click{' '}
-                          <strong className="text-rose-400">Inject Thermal Spike</strong> or{' '}
-                          <strong className="text-amber-400">Simulate Voltage Sag</strong> above to test live anomaly capture!
+                  ) : (
+                    filteredAnomalies.map((item) => (
+                      <tr key={item.id} className="hover:bg-slate-800/40 transition-colors">
+                        <td className="py-2.5 px-4 text-slate-300">{item.timestamp}</td>
+                        <td className="py-2.5 px-4 font-bold text-white">{item.nodeId}</td>
+                        <td className="py-2.5 px-4 text-slate-300">{item.metric}</td>
+                        <td className="py-2.5 px-4 text-white font-semibold">{item.observed}</td>
+                        <td className="py-2.5 px-4 text-slate-400">{item.mean}</td>
+                        <td className="py-2.5 px-4 text-rose-400 font-bold">
+                          {item.zScore >= 0 ? `+${item.zScore}` : item.zScore}σ
+                        </td>
+                        <td className="py-2.5 px-4">
+                          <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                            {item.faultMode}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-4">
+                          <span
+                            className={`px-2 py-0.5 rounded font-bold text-[10px] ${
+                              item.severity === 'CRITICAL'
+                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                            }`}
+                          >
+                            {item.severity}
+                          </span>
                         </td>
                       </tr>
-                    ) : (
-                      filteredAnomalies.map((row) => (
-                        <tr
-                          key={row.id}
-                          className="hover:bg-slate-800/40 transition-colors"
-                        >
-                          <td className="py-3 px-4 text-slate-300">{row.timestamp}</td>
-                          <td className="py-3 px-4 font-bold text-white">{row.nodeId}</td>
-                          <td className="py-3 px-4 text-slate-300">{row.metric}</td>
-                          <td className="py-3 px-4 text-white font-semibold">{row.observed}</td>
-                          <td className="py-3 px-4 text-slate-400">{row.mean}</td>
-                          <td className="py-3 px-4 font-bold text-rose-400">
-                            {row.zScore >= 0 ? `+${row.zScore}` : row.zScore}σ
-                          </td>
-                          <td className="py-3 px-4">
-                            <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 text-[10px]">
-                              {row.faultMode}
-                            </span>
-                          </td>
-                          <td className="py-3 px-4">
-                            <span
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                row.severity === 'CRITICAL'
-                                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-                                  : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                              }`}
-                            >
-                              {row.severity}
-                            </span>
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
+                    ))
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         )}
 
         {activeTab === 'firmware' && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Left Column: Hardware Pin & Cloud Configuration Form */}
-            <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 space-y-4 self-start">
-              <div>
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div className="lg:col-span-4 bg-slate-900/70 border border-slate-800 rounded-xl p-5 space-y-4">
+              <div className="pb-3 border-b border-slate-800">
                 <h2 className="text-base font-bold text-white flex items-center gap-2">
                   <Cpu className="w-4 h-4 text-emerald-400" />
-                  ESP32 Hardware Configuration
+                  <span>ESP32 Pinout & Firmware Config</span>
                 </h2>
                 <p className="text-xs text-slate-400 mt-1">
-                  Customize GPIO pins, ADC channels, and Supabase REST endpoint to generate production-ready Arduino C++ firmware.
+                  Customize GPIO pins and endpoints to generate ready-to-flash Arduino / ESP-IDF C++ firmware with both USB Web Serial and Wi-Fi telemetry.
                 </p>
               </div>
 
-              <div className="space-y-3 text-xs">
+              <div className="space-y-3 text-xs font-mono">
                 <div>
-                  <label className="block font-mono text-slate-400 mb-1">TARGET NODE ID</label>
+                  <label className="block text-slate-400 mb-1">Target Node ID</label>
                   <select
                     value={fwConfig.nodeId}
                     onChange={(e) => setFwConfig({ ...fwConfig, nodeId: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-white focus:outline-none focus:border-emerald-500"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white"
                   >
-                    <option value="ESP32-NODE-01">ESP32-NODE-01 (Cold Storage)</option>
-                    <option value="ESP32-NODE-02">ESP32-NODE-02 (Main Panel)</option>
-                    <option value="ESP32-NODE-03">ESP32-NODE-03 (Server Rack)</option>
+                    {Object.keys(NODE_CONFIGS).map((id) => (
+                      <option key={id} value={id}>
+                        {id} — {NODE_CONFIGS[id].name}
+                      </option>
+                    ))}
                   </select>
                 </div>
 
                 <div>
-                  <label className="block font-mono text-slate-400 mb-1">WIFI SSID</label>
+                  <label className="block text-slate-400 mb-1">Wi-Fi SSID</label>
                   <input
                     type="text"
                     value={fwConfig.wifiSsid}
                     onChange={(e) => setFwConfig({ ...fwConfig, wifiSsid: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-white focus:outline-none focus:border-emerald-500"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white"
                   />
                 </div>
 
                 <div>
-                  <label className="block font-mono text-slate-400 mb-1">SUPABASE PROJECT URL</label>
+                  <label className="block text-slate-400 mb-1">Supabase Project URL</label>
                   <input
                     type="text"
                     value={fwConfig.supabaseUrl}
                     onChange={(e) => setFwConfig({ ...fwConfig, supabaseUrl: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-white focus:outline-none focus:border-emerald-500"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white"
                   />
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-2 gap-3 pt-1">
                   <div>
-                    <label className="block font-mono text-slate-400 mb-1">DHT22 TEMP GPIO</label>
+                    <label className="block text-slate-400 mb-1">DHT22 Data Pin</label>
                     <input
                       type="number"
                       value={fwConfig.tempPin}
-                      onChange={(e) =>
-                        setFwConfig({ ...fwConfig, tempPin: parseInt(e.target.value || '4', 10) })
-                      }
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-emerald-400"
+                      onChange={(e) => setFwConfig({ ...fwConfig, tempPin: Number(e.target.value) })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-emerald-400"
                     />
                   </div>
                   <div>
-                    <label className="block font-mono text-slate-400 mb-1">ACS712 ADC GPIO</label>
+                    <label className="block text-slate-400 mb-1">ACS712 ADC Pin</label>
                     <input
                       type="number"
                       value={fwConfig.currentPin}
-                      onChange={(e) =>
-                        setFwConfig({
-                          ...fwConfig,
-                          currentPin: parseInt(e.target.value || '34', 10)
-                        })
-                      }
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-emerald-400"
+                      onChange={(e) => setFwConfig({ ...fwConfig, currentPin: Number(e.target.value) })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-emerald-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">ZMPT101B ADC Pin</label>
+                    <input
+                      type="number"
+                      value={fwConfig.voltagePin}
+                      onChange={(e) => setFwConfig({ ...fwConfig, voltagePin: Number(e.target.value) })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-emerald-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">Alert LED GPIO</label>
+                    <input
+                      type="number"
+                      value={fwConfig.statusLedPin}
+                      onChange={(e) => setFwConfig({ ...fwConfig, statusLedPin: Number(e.target.value) })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-emerald-400"
                     />
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-2 gap-3 pt-1">
                   <div>
-                    <label className="block font-mono text-slate-400 mb-1">ZMPT101B ADC GPIO</label>
-                    <input
-                      type="number"
-                      value={fwConfig.voltagePin}
-                      onChange={(e) =>
-                        setFwConfig({
-                          ...fwConfig,
-                          voltagePin: parseInt(e.target.value || '35', 10)
-                        })
-                      }
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-emerald-400"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-mono text-slate-400 mb-1">POLL INTERVAL (MS)</label>
+                    <label className="block text-slate-400 mb-1">Poll Interval (ms)</label>
                     <input
                       type="number"
                       step="250"
                       value={fwConfig.intervalMs}
+                      onChange={(e) => setFwConfig({ ...fwConfig, intervalMs: Number(e.target.value) })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">Edge Z-Threshold</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={fwConfig.zScoreAlertLimit}
                       onChange={(e) =>
-                        setFwConfig({
-                          ...fwConfig,
-                          intervalMs: parseInt(e.target.value || '1000', 10)
-                        })
+                        setFwConfig({ ...fwConfig, zScoreAlertLimit: Number(e.target.value) })
                       }
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-white"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-amber-400"
                     />
                   </div>
                 </div>
               </div>
-
-              <div className="pt-3 border-t border-slate-800 flex flex-col gap-2">
-                <button
-                  onClick={() => handleCopyText(generatedFirmwareCode, 'firmware')}
-                  className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs transition-all"
-                >
-                  {copiedId === 'firmware' ? (
-                    <>
-                      <Check className="w-4 h-4" />
-                      <span>Copied C++ Firmware to Clipboard!</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-4 h-4" />
-                      <span>Copy Firmware Code (.ino)</span>
-                    </>
-                  )}
-                </button>
-
-                <button
-                  onClick={() =>
-                    triggerFileDownload(
-                      generatedFirmwareCode,
-                      `esp32_edgepulse_${fwConfig.nodeId.toLowerCase()}.ino`,
-                      'text/plain;charset=utf-8;'
-                    )
-                  }
-                  className="w-full flex items-center justify-center gap-2 py-2 px-4 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-xs transition-all"
-                >
-                  <Download className="w-4 h-4 text-emerald-400" />
-                  <span>Download .ino Sketch</span>
-                </button>
-              </div>
             </div>
 
-            {/* Right 2 Columns: Live Generated C++ Code */}
-            <div className="lg:col-span-2 bg-slate-900/70 border border-slate-800 rounded-xl overflow-hidden flex flex-col">
-              <div className="bg-slate-950 px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-                <div className="flex items-center gap-2 font-mono text-xs text-slate-300">
-                  <Code2 className="w-4 h-4 text-emerald-400" />
-                  <span>esp32_edgepulse_node.ino</span>
+            <div className="lg:col-span-8 bg-slate-900/70 border border-slate-800 rounded-xl p-5 flex flex-col justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-3 border-b border-slate-800">
+                <div>
+                  <span className="font-mono text-xs text-emerald-400 font-bold">
+                    edgepulse_node.ino
+                  </span>
+                  <p className="text-xs text-slate-400">
+                    Outputs newline-delimited JSON @ 115200 baud for Web Serial + HTTPS POST to Supabase
+                  </p>
                 </div>
-                <span className="text-[11px] font-mono text-slate-400">
-                  ESP32-WROOM-32D • C++17 • ArduinoJson
-                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleCopyText(generatedFirmwareCode, 'fw')}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors"
+                  >
+                    {copiedId === 'fw' ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-emerald-400">Copied!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copy Sketch</span>
+                      </>
+                    )}
+                  </button>
+                  <button
+                    onClick={() =>
+                      triggerFileDownload(
+                        generatedFirmwareCode,
+                        `${fwConfig.nodeId.toLowerCase()}_firmware.ino`,
+                        'text/plain;charset=utf-8;'
+                      )
+                    }
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-semibold bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition-colors"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download .ino</span>
+                  </button>
+                </div>
               </div>
-              <pre className="p-4 text-xs font-mono text-slate-200 overflow-x-auto leading-relaxed max-h-[600px]">
-                <code>{generatedFirmwareCode}</code>
+
+              <pre className="bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs font-mono text-slate-300 overflow-x-auto max-h-[540px] leading-relaxed">
+                {generatedFirmwareCode}
               </pre>
             </div>
           </div>
         )}
 
-        {/* ==================================================================
-            TAB 4: SUPABASE POSTGRESQL & RLS SCHEMA (.SQL)
-           ================================================================== */}
         {activeTab === 'schema' && (
-          <div className="space-y-4">
-            <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800">
               <div>
                 <h2 className="text-base font-bold text-white flex items-center gap-2">
-                  <Database className="w-5 h-5 text-emerald-400" />
-                  Supabase PostgreSQL Schema, Time-Series Indexes & PL/pgSQL Anomaly Trigger
+                  <Database className="w-4 h-4 text-emerald-400" />
+                  <span>Supabase PostgreSQL Schema, BRIN Indexes & Trigger</span>
                 </h2>
-                <p className="text-xs text-slate-400 mt-1">
-                  Paste this directly into the Supabase SQL Editor to provision the <code className="text-emerald-400">telemetry_logs</code> and <code className="text-emerald-400">anomaly_events</code> tables with Row-Level Security (RLS).
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Paste directly into the Supabase SQL Editor to provision time-series tables and automatic anomaly auditing.
                 </p>
               </div>
 
-              <div className="flex items-center gap-2.5 shrink-0">
+              <div className="flex items-center gap-2">
                 <button
                   onClick={() => handleCopyText(supabaseSchemaCode, 'sql')}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs transition-all"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors"
                 >
                   {copiedId === 'sql' ? (
                     <>
-                      <Check className="w-4 h-4" />
-                      <span>Copied SQL!</span>
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="text-emerald-400">Copied SQL!</span>
                     </>
                   ) : (
                     <>
-                      <Copy className="w-4 h-4" />
-                      <span>Copy Schema SQL</span>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>Copy SQL</span>
                     </>
                   )}
                 </button>
-
                 <button
                   onClick={() =>
                     triggerFileDownload(
                       supabaseSchemaCode,
                       'edgepulse_supabase_schema.sql',
-                      'application/sql'
+                      'application/sql;charset=utf-8;'
                     )
                   }
-                  className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium text-xs transition-all"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-semibold bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition-colors"
                 >
-                  <Download className="w-4 h-4 text-emerald-400" />
+                  <Download className="w-3.5 h-3.5" />
                   <span>Download .sql</span>
                 </button>
               </div>
             </div>
 
-            <div className="bg-slate-900/70 border border-slate-800 rounded-xl overflow-hidden">
-              <div className="bg-slate-950 px-4 py-3 border-b border-slate-800 flex items-center justify-between text-xs font-mono text-slate-400">
-                <span>supabase/migrations/20261016_edgepulse_schema.sql</span>
-                <span>PostgreSQL 15+ • BRIN + B-Tree Indexed • RLS Enabled</span>
-              </div>
-              <pre className="p-5 text-xs font-mono text-slate-200 overflow-x-auto leading-relaxed">
-                <code>{supabaseSchemaCode}</code>
-              </pre>
-            </div>
+            <pre className="bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs font-mono text-slate-300 overflow-x-auto max-h-[560px] leading-relaxed">
+              {supabaseSchemaCode}
+            </pre>
           </div>
         )}
       </main>
