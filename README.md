@@ -1,16 +1,75 @@
-# React + Vite
+# EdgePulse — ESP32 Telemetry & Anomaly Analytics Studio
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+[![Live Demo](https://img.shields.io/badge/Live_Demo-Vercel-000000?style=for-the-badge&logo=vercel&logoColor=white)](https://edgepulse-iot-studio.vercel.app)
+[![React](https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB)](#)
+[![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-38B2AC?style=for-the-badge&logo=tailwind-css&logoColor=white)](#)
+[![ESP32](https://img.shields.io/badge/ESP32-E7352C?style=for-the-badge&logo=espressif&logoColor=white)](#)
+[![Supabase](https://img.shields.io/badge/Supabase-181818?style=for-the-badge&logo=supabase&logoColor=3ECF8E)](#)
 
-Currently, two official plugins are available:
+**EdgePulse** is an IoT telemetry dashboard, virtual hardware fault emulator, and time-series anomaly detection tool. I built it to connect **ESP32 microcontroller sensor nodes** with browser-based **statistical diagnostics** (rolling Z-score confidence bands and Ordinary Least Squares linear regression forecasting) backed by **Supabase PostgreSQL**.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+---
 
-## React Compiler
+## Features
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+* **3-Node Virtual ESP32 Cluster Emulator:** Stream telemetry across three zones (`ESP32-NODE-01` Cold Storage Chiller, `ESP32-NODE-02` Main Distribution Panel, and `ESP32-NODE-03` Comms Server Rack) at `250ms`, `500ms`, or `1000ms` intervals.
+* **Hardware Fault Injection:** Trigger **Thermal Spikes**, **AC Voltage Sags**, and **Sensor Noise** on the fly to test how the rolling confidence bands and regression trendlines react.
+* **Dual-Axis SVG Time-Series Chart:** Built from scratch without external charting libraries. Includes a shaded confidence envelope, OLS regression line, anomaly markers, and sample-level crosshair inspection.
+* **CSV & JSON Export:** Dump the current multi-node telemetry window and anomaly logs to **CSV** or **JSON** for offline analysis in Python/Pandas.
+* **ESP32 Firmware & Supabase SQL Generators:** Configure GPIO pins directly in the UI and export the matching `.ino` C++ sketch and PostgreSQL schema (with BRIN indexes and Row-Level Security).
 
-## Expanding the Oxlint configuration
+---
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+## How the Anomaly Engine Works
+
+Instead of relying on static hard-coded cutoffs that trigger false alarms during normal load changes, **EdgePulse** scores incoming readings against a sliding window of $N = 40$ telemetry packets per node:
+
+1. **Rolling Z-Score Anomaly Detection**
+   Calculates the rolling mean ($\mu$) and standard deviation ($\sigma$) over the active window:
+
+   $$Z_t = \frac{x_t - \mu_{\text{window}}}{\sigma_{\text{window}}}$$
+
+   Any frame where $\vert Z_t \vert \ge k$ (adjustable from $1.5\sigma$ to $3.5\sigma$, default $2.2\sigma$) flags the hardware node and logs a `WARNING` or `CRITICAL` event.
+
+2. **Ordinary Least Squares (OLS) Thermal Trend Forecasting**
+   Computes the linear regression slope ($\beta_1$) and $R^2$ fit over the active window to project a **5-minute thermal trajectory**:
+
+   $$\beta_1 = \frac{n \sum (t_i y_i) - \sum t_i \sum y_i}{n \sum t_i^2 - (\sum t_i)^2}$$
+
+---
+
+## System Architecture
+
+1. **ESP32 Edge Layer:** Reads `DHT22`, `ACS712`, and `ZMPT101B` sensors via 64-sample ADC oversampling, computes rolling Z-scores in a circular buffer, and sends JSON payloads over HTTPS.
+2. **Supabase Backend:** Ingests telemetry via PostgREST, runs a `PL/pgSQL` trigger on insert to log anomalies automatically, and broadcasts live updates over Supabase Realtime.
+3. **React Studio UI:** Visualizes the real-time stream, simulates hardware faults for testing, and exports `.csv`, `.json`, `.ino`, and `.sql` files.
+
+---
+
+## Default ESP32-WROOM-32D Pinout
+
+| Peripheral Sensor | Signal Type | Default GPIO | Description |
+| :--- | :--- | :--- | :--- |
+| **DHT22** | Digital One-Wire | `GPIO 4` | Ambient & enclosure temperature sensing ($^\circ\text{C}$) |
+| **ACS712 (30A)** | Analog (`ADC1_CH6`) | `GPIO 34` | 64-sample RMS AC current draw measurement ($\text{A}$) |
+| **ZMPT101B** | Analog (`ADC1_CH7`) | `GPIO 35` | 64-sample RMS AC line voltage sensing ($\text{V}$) |
+| **Status Watchdog** | Digital Output | `GPIO 2` | On-board alert LED driven HIGH when $\vert Z \vert \ge k$ |
+
+---
+
+## Running Locally
+
+```bash
+git clone https://github.com/ce1rik/edgepulse-iot-studio.git
+cd edgepulse-iot-studio
+npm install
+npm run dev
+```
+
+---
+
+## Author
+
+**Ceirik G. Agustin**  
+Computer Engineering Student | Full-Stack & Embedded Systems Developer  
+Cagayan de Oro, Philippines
